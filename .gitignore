@@ -36,3 +36,9 @@ htmlcov/
 .coverage
 .mypy_cache/
 .ruff_cache/
+
+# Installer temp files
+installer/*.exe
+installer/*.msi
+installer/*.zip
+openreach_install.log
