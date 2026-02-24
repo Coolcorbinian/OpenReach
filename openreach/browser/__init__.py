@@ -1,1 +1,1 @@
-"""OpenReach browser automation -- Playwright session management."""
+"""OpenReach browser automation -- Playwright session management and platform sessions."""

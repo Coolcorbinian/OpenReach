@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta
 from typing import Any
@@ -9,7 +10,7 @@ from typing import Any
 from sqlalchemy import create_engine, func
 from sqlalchemy.orm import Session as SASession, sessionmaker
 
-from openreach.data.models import Base, Lead, OutreachLog, Session
+from openreach.data.models import Base, Lead, OutreachLog, Session, Campaign, ActivityLog
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,36 @@ class DataStore:
 
         self.engine = create_engine(f"sqlite:///{db_path}", echo=False)
         Base.metadata.create_all(self.engine)
+        self._migrate_schema()
         self._session_factory = sessionmaker(bind=self.engine)
+
+    def _migrate_schema(self) -> None:
+        """Add new columns to existing tables if they don't exist (lightweight migration)."""
+        import sqlite3
+        db_url = str(self.engine.url).replace("sqlite:///", "")
+        conn = sqlite3.connect(db_url)
+        cursor = conn.cursor()
+
+        # Mapping: (table, column, type, default)
+        migrations = [
+            ("leads", "scraped_profile", "TEXT", None),
+            ("leads", "scraped_at", "DATETIME", None),
+            ("outreach_log", "campaign_id", "INTEGER", None),
+            ("sessions", "campaign_id", "INTEGER", None),
+        ]
+
+        for table, column, col_type, default in migrations:
+            try:
+                cursor.execute(f"SELECT {column} FROM {table} LIMIT 1")
+            except sqlite3.OperationalError:
+                # Column doesn't exist, add it
+                default_clause = f" DEFAULT {default}" if default is not None else ""
+                sql = f"ALTER TABLE {table} ADD COLUMN {column} {col_type}{default_clause}"
+                cursor.execute(sql)
+                logger.info("Migration: added %s.%s (%s)", table, column, col_type)
+
+        conn.commit()
+        conn.close()
 
     def _session(self) -> SASession:
         return self._session_factory()
@@ -129,11 +159,13 @@ class DataStore:
         state: str,
         message: str | None = None,
         error: str | None = None,
+        campaign_id: int | None = None,
     ) -> None:
         """Record an outreach attempt."""
         with self._session() as session:
             log = OutreachLog(
                 lead_id=lead.get("id", 0),
+                campaign_id=campaign_id,
                 channel="instagram_dm",
                 state=state,
                 message=message,
@@ -211,3 +243,173 @@ class DataStore:
                 "today_sent": today_sent,
                 "reply_rate": round(total_replied / total_sent * 100, 1) if total_sent > 0 else 0.0,
             }
+
+    # --- Campaigns ---
+
+    def create_campaign(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Create a new campaign. Returns the campaign dict."""
+        with self._session() as session:
+            campaign = Campaign(
+                name=data.get("name", "Default Campaign"),
+                platform=data.get("platform", "instagram"),
+                mode=data.get("mode", "dynamic"),
+                user_prompt=data.get("user_prompt", ""),
+                additional_notes=data.get("additional_notes", ""),
+                message_template=data.get("message_template", ""),
+                sender_username=data.get("sender_username", ""),
+                sender_password=data.get("sender_password", ""),
+                daily_limit=data.get("daily_limit", 50),
+                session_limit=data.get("session_limit", 15),
+                delay_min=data.get("delay_min", 45),
+                delay_max=data.get("delay_max", 180),
+                is_active=data.get("is_active", False),
+            )
+            session.add(campaign)
+            session.commit()
+            session.refresh(campaign)
+            return self._campaign_to_dict(campaign)
+
+    def update_campaign(self, campaign_id: int, data: dict[str, Any]) -> dict[str, Any] | None:
+        """Update a campaign. Returns updated dict or None."""
+        with self._session() as session:
+            campaign = session.query(Campaign).filter(Campaign.id == campaign_id).first()
+            if not campaign:
+                return None
+            for key in (
+                "name", "platform", "mode", "user_prompt", "additional_notes",
+                "message_template", "sender_username", "sender_password",
+                "daily_limit", "session_limit", "delay_min", "delay_max", "is_active",
+            ):
+                if key in data:
+                    setattr(campaign, key, data[key])
+            campaign.updated_at = datetime.utcnow()
+            session.commit()
+            session.refresh(campaign)
+            return self._campaign_to_dict(campaign)
+
+    def get_campaign(self, campaign_id: int) -> dict[str, Any] | None:
+        """Get a single campaign by ID."""
+        with self._session() as session:
+            campaign = session.query(Campaign).filter(Campaign.id == campaign_id).first()
+            if not campaign:
+                return None
+            return self._campaign_to_dict(campaign)
+
+    def get_campaigns(self) -> list[dict[str, Any]]:
+        """Get all campaigns."""
+        with self._session() as session:
+            campaigns = session.query(Campaign).order_by(Campaign.created_at.desc()).all()
+            return [self._campaign_to_dict(c) for c in campaigns]
+
+    def get_active_campaign(self) -> dict[str, Any] | None:
+        """Get the currently active campaign."""
+        with self._session() as session:
+            campaign = session.query(Campaign).filter(Campaign.is_active == True).first()
+            if not campaign:
+                return None
+            return self._campaign_to_dict(campaign)
+
+    def delete_campaign(self, campaign_id: int) -> bool:
+        """Delete a campaign. Returns True if deleted."""
+        with self._session() as session:
+            campaign = session.query(Campaign).filter(Campaign.id == campaign_id).first()
+            if not campaign:
+                return False
+            session.delete(campaign)
+            session.commit()
+            return True
+
+    def _campaign_to_dict(self, c: Campaign) -> dict[str, Any]:
+        return {
+            "id": c.id,
+            "name": c.name,
+            "platform": c.platform,
+            "mode": c.mode,
+            "user_prompt": c.user_prompt,
+            "additional_notes": c.additional_notes,
+            "message_template": c.message_template,
+            "sender_username": c.sender_username,
+            "sender_password": c.sender_password,
+            "daily_limit": c.daily_limit,
+            "session_limit": c.session_limit,
+            "delay_min": c.delay_min,
+            "delay_max": c.delay_max,
+            "is_active": c.is_active,
+            "created_at": c.created_at.isoformat() if c.created_at else None,
+            "updated_at": c.updated_at.isoformat() if c.updated_at else None,
+        }
+
+    # --- Activity Log ---
+
+    def log_activity(
+        self,
+        message: str,
+        level: str = "info",
+        campaign_id: int | None = None,
+        session_id: int | None = None,
+        details: str | None = None,
+    ) -> None:
+        """Write an entry to the activity log."""
+        with self._session() as session:
+            entry = ActivityLog(
+                campaign_id=campaign_id,
+                session_id=session_id,
+                level=level,
+                message=message,
+                details=details,
+            )
+            session.add(entry)
+            session.commit()
+
+    def get_activity_log(
+        self,
+        campaign_id: int | None = None,
+        limit: int = 50,
+        after_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Get recent activity log entries."""
+        with self._session() as session:
+            query = session.query(ActivityLog)
+            if campaign_id is not None:
+                query = query.filter(ActivityLog.campaign_id == campaign_id)
+            if after_id is not None:
+                query = query.filter(ActivityLog.id > after_id)
+            query = query.order_by(ActivityLog.id.desc()).limit(limit)
+            entries = query.all()
+            return [
+                {
+                    "id": e.id,
+                    "level": e.level,
+                    "message": e.message,
+                    "details": e.details,
+                    "campaign_id": e.campaign_id,
+                    "session_id": e.session_id,
+                    "created_at": e.created_at.isoformat() if e.created_at else None,
+                }
+                for e in reversed(entries)  # chronological order
+            ]
+
+    # --- Lead profile cache ---
+
+    def update_lead_profile(self, lead_id: int, profile_data: dict[str, Any]) -> None:
+        """Cache scraped social profile data for a lead."""
+        with self._session() as session:
+            lead = session.query(Lead).filter(Lead.id == lead_id).first()
+            if lead:
+                lead.scraped_profile = json.dumps(profile_data)
+                lead.scraped_at = datetime.utcnow()
+                session.commit()
+
+    def get_lead_cached_profile(self, lead_id: int, max_age_days: int = 7) -> dict[str, Any] | None:
+        """Get cached profile if fresh enough, else None."""
+        with self._session() as session:
+            lead = session.query(Lead).filter(Lead.id == lead_id).first()
+            if not lead or not lead.scraped_profile or not lead.scraped_at:
+                return None
+            age = datetime.utcnow() - lead.scraped_at
+            if age > timedelta(days=max_age_days):
+                return None
+            try:
+                return json.loads(lead.scraped_profile)
+            except (json.JSONDecodeError, TypeError):
+                return None

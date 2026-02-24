@@ -18,7 +18,7 @@ class OllamaClient:
         model: str = "qwen3:4b",
         base_url: str = "http://localhost:11434",
         temperature: float = 0.7,
-        timeout: float = 120.0,
+        timeout: float = 600.0,
     ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
@@ -46,7 +46,9 @@ class OllamaClient:
             "stream": False,
             "options": {
                 "temperature": self.temperature,
+                "num_predict": 256,
             },
+            "think": False,
         }
 
         try:
@@ -100,3 +102,33 @@ class OllamaClient:
         except httpx.ConnectError:
             logger.error("Ollama is not running at %s", self.base_url)
             return False
+
+    def generate_sync(self, prompt: str, system: str | None = None) -> str:
+        """Synchronous wrapper for message generation (for use outside async contexts)."""
+        import httpx as _httpx
+
+        messages: list[dict[str, str]] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "temperature": self.temperature,
+                "num_predict": 256,
+            },
+            "think": False,
+        }
+
+        with _httpx.Client(timeout=self.timeout) as client:
+            response = client.post(
+                f"{self.base_url}/api/chat",
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
+            content = data.get("message", {}).get("content", "")
+            return content

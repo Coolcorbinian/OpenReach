@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
 from typing import Any
 
 from flask import Flask, jsonify, render_template_string, request
@@ -12,6 +14,15 @@ from openreach.data.cormass_api import CormassApiClient
 from openreach.data.store import DataStore
 
 logger = logging.getLogger(__name__)
+
+# Global agent reference for background thread management
+_agent_engine = None
+_agent_thread = None
+_agent_lock = threading.Lock()
+
+# Background preview/dry-run tasks
+_preview_tasks: dict[str, dict] = {}
+_preview_lock = threading.Lock()
 
 DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -131,6 +142,50 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                                    border-radius: 3px; overflow: hidden; margin-top: 0.5rem; }
         .progress-bar { height: 100%; background: #7c3aed; border-radius: 3px;
                         transition: width 0.3s ease; width: 0%; }
+
+        /* Activity log */
+        .activity-log { max-height: 350px; overflow-y: auto; font-size: 0.8125rem;
+                        font-family: 'Consolas', 'Monaco', monospace; }
+        .activity-entry { padding: 0.375rem 0.5rem; border-bottom: 1px solid #1a1a1a; }
+        .activity-entry .time { color: #525252; margin-right: 0.5rem; }
+        .activity-entry.level-success { color: #4ade80; }
+        .activity-entry.level-error { color: #f87171; }
+        .activity-entry.level-warning { color: #fbbf24; }
+        .activity-entry.level-info { color: #94a3b8; }
+
+        /* Campaign form */
+        .form-textarea { width: 100%; padding: 0.625rem 0.75rem; background: #0a0a0a;
+                         border: 1px solid #404040; border-radius: 0.5rem; color: #e5e5e5;
+                         font-size: 0.875rem; font-family: inherit; min-height: 80px; resize: vertical; }
+        .form-textarea:focus { outline: none; border-color: #7c3aed; }
+        .form-select { width: 100%; padding: 0.625rem 0.75rem; background: #0a0a0a;
+                       border: 1px solid #404040; border-radius: 0.5rem; color: #e5e5e5;
+                       font-size: 0.875rem; font-family: inherit; appearance: none;
+                       background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%23737373' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E");
+                       background-repeat: no-repeat; background-position: right 0.75rem center; }
+        .form-select:focus { outline: none; border-color: #7c3aed; }
+        .mode-toggle { display: flex; gap: 0; border: 1px solid #404040; border-radius: 0.5rem; overflow: hidden; }
+        .mode-toggle button { flex: 1; padding: 0.625rem 1rem; background: #0a0a0a; color: #737373;
+                               border: none; font-size: 0.875rem; cursor: pointer; transition: all 0.15s; }
+        .mode-toggle button.active { background: #7c3aed; color: white; }
+        .mode-toggle button:hover:not(.active) { background: #171717; color: #e5e5e5; }
+        .campaign-card { background: #0a0a0a; border: 1px solid #262626; border-radius: 0.5rem;
+                         padding: 1rem; margin-bottom: 0.75rem; display: flex;
+                         justify-content: space-between; align-items: center; }
+        .campaign-card.active-campaign { border-color: #7c3aed; }
+        .campaign-info .campaign-name { font-weight: 500; font-size: 0.9375rem; }
+        .campaign-info .campaign-meta { font-size: 0.75rem; color: #737373; margin-top: 0.25rem; }
+        .form-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+        @media (max-width: 700px) { .form-cols { grid-template-columns: 1fr; } }
+        .divider { border-top: 1px solid #262626; margin: 1.5rem 0; }
+        .agent-status-bar { display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem 1rem;
+                           background: #171717; border: 1px solid #262626; border-radius: 0.5rem;
+                           margin-bottom: 1rem; }
+        .agent-status-bar .pulse { width: 10px; height: 10px; border-radius: 50%; }
+        .agent-status-bar .pulse.running { background: #22c55e; animation: pulse 1.5s infinite; }
+        .agent-status-bar .pulse.idle { background: #525252; }
+        .agent-status-bar .pulse.error { background: #ef4444; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
     </style>
 </head>
 <body>
@@ -142,12 +197,22 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
         <div class="tabs">
             <button class="tab active" onclick="switchTab('dashboard')">Dashboard</button>
+            <button class="tab" onclick="switchTab('campaign')">Campaign</button>
             <button class="tab" onclick="switchTab('import')">Import Leads</button>
             <button class="tab" onclick="switchTab('settings')">Settings</button>
         </div>
 
         <!-- DASHBOARD TAB -->
         <div class="tab-content active" id="tab-dashboard">
+            <!-- Agent Status Bar -->
+            <div class="agent-status-bar" id="agent-bar">
+                <div class="pulse idle" id="agent-pulse"></div>
+                <span id="agent-status-text" style="font-size: 0.875rem; font-weight: 500;">Agent Idle</span>
+                <span id="agent-detail" style="font-size: 0.75rem; color: #737373; margin-left: auto;"></span>
+                <button class="btn btn-primary" id="btn-start" onclick="startAgent()" style="padding: 0.375rem 0.875rem; font-size: 0.8125rem;">Start</button>
+                <button class="btn btn-danger" id="btn-stop" onclick="stopAgent()" style="display:none; padding: 0.375rem 0.875rem; font-size: 0.8125rem;">Stop</button>
+            </div>
+
             <div class="stats-grid" id="stats">
                 <div class="stat-card">
                     <div class="label">Total Leads</div>
@@ -175,9 +240,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 </div>
             </div>
 
-            <div class="actions">
-                <button class="btn btn-primary" id="btn-start" onclick="startAgent()">Start Agent</button>
-                <button class="btn btn-danger" id="btn-stop" onclick="stopAgent()" style="display:none">Stop Agent</button>
+            <!-- Activity Log -->
+            <div class="section">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+                    <h2 style="margin: 0;">Activity Log</h2>
+                    <button class="btn btn-secondary" onclick="clearActivityView()" style="font-size: 0.75rem; padding: 0.25rem 0.625rem;">Clear</button>
+                </div>
+                <div class="activity-log" id="activity-log">
+                    <div class="activity-entry level-info"><span class="time">--:--:--</span>Waiting for agent to start...</div>
+                </div>
             </div>
 
             <div class="section">
@@ -197,6 +268,141 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                         <tr><td colspan="6" style="color: #525252">Loading...</td></tr>
                     </tbody>
                 </table>
+            </div>
+        </div>
+
+        <!-- CAMPAIGN TAB -->
+        <div class="tab-content" id="tab-campaign">
+            <div class="section">
+                <h2>Campaign Configuration</h2>
+                <p style="color: #737373; font-size: 0.875rem; margin-bottom: 1.25rem;">
+                    Configure your outreach campaign. Set the platform, mode, message prompt, and sender credentials.
+                    The agent will use this configuration when processing leads.
+                </p>
+
+                <div class="form-group">
+                    <label for="camp-name">Campaign Name</label>
+                    <input type="text" class="form-input" id="camp-name" placeholder="My Outreach Campaign">
+                </div>
+
+                <div class="form-cols">
+                    <div class="form-group">
+                        <label>Platform</label>
+                        <select class="form-select" id="camp-platform" onchange="onPlatformChange()">
+                            <option value="instagram">Instagram</option>
+                            <option value="linkedin" disabled>LinkedIn (coming soon)</option>
+                            <option value="twitter" disabled>Twitter / X (coming soon)</option>
+                            <option value="email" disabled>Email (coming soon)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Outreach Mode</label>
+                        <div class="mode-toggle">
+                            <button id="mode-dynamic" class="active" onclick="setMode('dynamic')">Dynamic (AI)</button>
+                            <button id="mode-static" onclick="setMode('static')">Static (Template)</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="divider"></div>
+
+                <!-- Dynamic mode fields -->
+                <div id="dynamic-fields">
+                    <div class="form-group">
+                        <label for="camp-prompt">AI Prompt (defines the AI's role and behavior)</label>
+                        <textarea class="form-textarea" id="camp-prompt" rows="4"
+                            placeholder="You are a sales outreach assistant for [Your Company]. You help connect with businesses that need [your service]. Be friendly, concise, and reference something specific about their business."></textarea>
+                        <div style="font-size: 0.7rem; color: #525252; margin-top: 0.375rem;">
+                            This becomes the AI's system instructions. Tell it who you are, what you offer, and how to approach leads.
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="camp-notes">Additional Notes (extra context for the AI)</label>
+                        <textarea class="form-textarea" id="camp-notes" rows="3"
+                            placeholder="Our main USP is... We target businesses that... Never mention pricing..."></textarea>
+                        <div style="font-size: 0.7rem; color: #525252; margin-top: 0.375rem;">
+                            Additional information the AI should know. Pricing details, USPs, tone preferences, things to avoid, etc.
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Static mode fields -->
+                <div id="static-fields" style="display: none;">
+                    <div class="form-group">
+                        <label for="camp-template">Message Template</label>
+                        <textarea class="form-textarea" id="camp-template" rows="5"
+                            placeholder="Hi {{name}}! I noticed your {{business_type}} business in {{location}}. We help businesses like yours with [service]. Would you be open to a quick chat?"></textarea>
+                        <div style="font-size: 0.7rem; color: #525252; margin-top: 0.375rem;">
+                            Use {{name}}, {{business_type}}, {{location}}, {{rating}}, {{website}}, {{instagram_handle}}, {{notes}}, {{pain_points}} as placeholders.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="divider"></div>
+
+                <h3 style="font-size: 1rem; margin-bottom: 1rem;">Sender Account</h3>
+                <div class="form-cols">
+                    <div class="form-group">
+                        <label for="camp-username">Username</label>
+                        <input type="text" class="form-input" id="camp-username" placeholder="your_instagram_handle">
+                    </div>
+                    <div class="form-group">
+                        <label for="camp-password">Password</label>
+                        <input type="password" class="form-input" id="camp-password" placeholder="Account password">
+                    </div>
+                </div>
+
+                <div class="divider"></div>
+
+                <h3 style="font-size: 1rem; margin-bottom: 1rem;">Limits</h3>
+                <div class="form-cols">
+                    <div class="form-group">
+                        <label for="camp-daily">Daily Limit</label>
+                        <input type="number" class="form-input" id="camp-daily" value="50" min="1" max="500">
+                    </div>
+                    <div class="form-group">
+                        <label for="camp-session">Per Session Limit</label>
+                        <input type="number" class="form-input" id="camp-session" value="15" min="1" max="100">
+                    </div>
+                </div>
+                <div class="form-cols">
+                    <div class="form-group">
+                        <label for="camp-delay-min">Min Delay (seconds)</label>
+                        <input type="number" class="form-input" id="camp-delay-min" value="45" min="10" max="600">
+                    </div>
+                    <div class="form-group">
+                        <label for="camp-delay-max">Max Delay (seconds)</label>
+                        <input type="number" class="form-input" id="camp-delay-max" value="180" min="20" max="900">
+                    </div>
+                </div>
+
+                <div class="divider"></div>
+
+                <div style="display: flex; gap: 0.75rem; flex-wrap: wrap;">
+                    <button class="btn btn-primary" onclick="saveCampaign()" id="btn-save-campaign">Save Campaign</button>
+                    <button class="btn btn-secondary" onclick="previewMessage()" id="btn-preview">Preview Message</button>
+                    <button class="btn btn-secondary" onclick="dryRun()" id="btn-dry-run">Dry Run (1 Lead)</button>
+                </div>
+
+                <div id="campaign-status" style="margin-top: 0.75rem; font-size: 0.8125rem;"></div>
+
+                <!-- Message Preview -->
+                <div id="preview-result" style="display: none; margin-top: 1rem;">
+                    <div class="section" style="background: #0f0f0f;">
+                        <h3 style="font-size: 0.875rem; margin-bottom: 0.5rem;">Message Preview</h3>
+                        <div id="preview-text" style="font-size: 0.875rem; white-space: pre-wrap; line-height: 1.5;"></div>
+                        <div id="preview-meta" style="font-size: 0.75rem; color: #525252; margin-top: 0.5rem;"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Saved Campaigns -->
+            <div class="section">
+                <h2>Saved Campaigns</h2>
+                <div id="campaigns-list" style="margin-top: 0.75rem;">
+                    <div style="color: #525252; font-size: 0.875rem;">Loading campaigns...</div>
+                </div>
             </div>
         </div>
 
@@ -299,16 +505,24 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="toast" id="toast"></div>
 
     <script>
+        // ---- State ----
+        let currentCampaignId = null;
+        let currentMode = 'dynamic';
+        let agentRunning = false;
+        let lastActivityId = 0;
+        let activityPollTimer = null;
+        let statusPollTimer = null;
+
         // ---- Tab switching ----
         function switchTab(tabId) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
             document.getElementById('tab-' + tabId).classList.add('active');
-            document.querySelector('.tab[onclick*=\"' + tabId + '\"]').classList.add('active');
+            document.querySelector('.tab[onclick*="' + tabId + '"]').classList.add('active');
 
-            // Load data when switching to import tab
             if (tabId === 'import') { checkImportReady(); }
             if (tabId === 'settings') { loadSettings(); }
+            if (tabId === 'campaign') { loadCampaigns(); }
         }
 
         // ---- Toast notifications ----
@@ -355,19 +569,401 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             } catch (e) { console.error('Failed to load leads', e); }
         }
 
-        // ---- Agent controls ----
+        // ---- Agent Controls ----
         async function startAgent() {
-            document.getElementById('btn-start').style.display = 'none';
-            document.getElementById('btn-stop').style.display = '';
-            document.getElementById('agent-status').textContent = 'Agent: Running...';
-            await fetch('/api/agent/start', { method: 'POST' });
+            try {
+                const res = await fetch('/api/agent/start', { method: 'POST' });
+                const data = await res.json();
+                if (data.error) {
+                    showToast(data.error, 'error');
+                    return;
+                }
+                agentRunning = true;
+                updateAgentUI('running');
+                showToast('Agent started', 'success');
+                startActivityPolling();
+                startStatusPolling();
+            } catch (e) {
+                showToast('Failed to start agent', 'error');
+            }
         }
 
         async function stopAgent() {
-            document.getElementById('btn-start').style.display = '';
-            document.getElementById('btn-stop').style.display = 'none';
-            document.getElementById('agent-status').textContent = 'Agent: Stopping...';
-            await fetch('/api/agent/stop', { method: 'POST' });
+            try {
+                await fetch('/api/agent/stop', { method: 'POST' });
+                showToast('Stopping agent...', 'info');
+            } catch (e) {
+                showToast('Failed to stop agent', 'error');
+            }
+        }
+
+        function updateAgentUI(state) {
+            const pulse = document.getElementById('agent-pulse');
+            const text = document.getElementById('agent-status-text');
+            const btnStart = document.getElementById('btn-start');
+            const btnStop = document.getElementById('btn-stop');
+            const statusHeader = document.getElementById('agent-status');
+
+            if (state === 'running' || state === 'planning' || state === 'executing' ||
+                state === 'scraping' || state === 'waiting' || state === 'logging_in' || state === 'starting') {
+                pulse.className = 'pulse running';
+                const labels = { running: 'Running', planning: 'Planning Message', executing: 'Sending Message',
+                                 scraping: 'Scraping Profile', waiting: 'Waiting', logging_in: 'Logging In', starting: 'Starting' };
+                text.textContent = 'Agent: ' + (labels[state] || 'Running');
+                btnStart.style.display = 'none';
+                btnStop.style.display = '';
+                agentRunning = true;
+            } else if (state === 'error') {
+                pulse.className = 'pulse error';
+                text.textContent = 'Agent: Error';
+                btnStart.style.display = '';
+                btnStop.style.display = 'none';
+                agentRunning = false;
+                stopActivityPolling();
+                stopStatusPolling();
+            } else {
+                pulse.className = 'pulse idle';
+                text.textContent = 'Agent: Idle';
+                btnStart.style.display = '';
+                btnStop.style.display = 'none';
+                agentRunning = false;
+                stopActivityPolling();
+                stopStatusPolling();
+            }
+            if (statusHeader) { statusHeader.textContent = text.textContent; }
+        }
+
+        // ---- Activity Log ----
+        function startActivityPolling() {
+            if (activityPollTimer) return;
+            activityPollTimer = setInterval(pollActivity, 2000);
+            pollActivity(); // immediate first poll
+        }
+
+        function stopActivityPolling() {
+            if (activityPollTimer) { clearInterval(activityPollTimer); activityPollTimer = null; }
+        }
+
+        async function pollActivity() {
+            try {
+                const url = '/api/activity?after_id=' + lastActivityId;
+                const res = await fetch(url);
+                const entries = await res.json();
+                if (entries.length > 0) {
+                    const logEl = document.getElementById('activity-log');
+                    // Remove placeholder
+                    if (lastActivityId === 0) { logEl.innerHTML = ''; }
+                    entries.forEach(e => {
+                        const div = document.createElement('div');
+                        div.className = 'activity-entry level-' + e.level;
+                        const time = e.created_at ? new Date(e.created_at).toLocaleTimeString() : '--:--:--';
+                        div.innerHTML = '<span class="time">' + time + '</span>' + esc(e.message);
+                        logEl.appendChild(div);
+                        lastActivityId = Math.max(lastActivityId, e.id);
+                    });
+                    logEl.scrollTop = logEl.scrollHeight;
+                }
+            } catch (e) { console.error('Activity poll error', e); }
+        }
+
+        function clearActivityView() {
+            document.getElementById('activity-log').innerHTML =
+                '<div class="activity-entry level-info"><span class="time">--:--:--</span>Waiting for agent to start...</div>';
+            lastActivityId = 0;
+        }
+
+        // ---- Agent Status Polling ----
+        function startStatusPolling() {
+            if (statusPollTimer) return;
+            statusPollTimer = setInterval(pollAgentStatus, 3000);
+        }
+
+        function stopStatusPolling() {
+            if (statusPollTimer) { clearInterval(statusPollTimer); statusPollTimer = null; }
+        }
+
+        async function pollAgentStatus() {
+            try {
+                const res = await fetch('/api/agent/status');
+                const data = await res.json();
+                updateAgentUI(data.state);
+                const detail = document.getElementById('agent-detail');
+                if (data.stats) {
+                    detail.textContent = 'Sent: ' + data.stats.messages_sent +
+                        ' | Failed: ' + data.stats.messages_failed +
+                        ' | Processed: ' + data.stats.leads_processed;
+                }
+                if (data.state === 'idle' || data.state === 'stopped' || data.state === 'error') {
+                    loadStats(); // refresh dashboard stats after run
+                }
+            } catch (e) { console.error('Status poll error', e); }
+        }
+
+        // ---- Campaign Tab ----
+        function setMode(mode) {
+            currentMode = mode;
+            document.getElementById('mode-dynamic').classList.toggle('active', mode === 'dynamic');
+            document.getElementById('mode-static').classList.toggle('active', mode === 'static');
+            document.getElementById('dynamic-fields').style.display = mode === 'dynamic' ? '' : 'none';
+            document.getElementById('static-fields').style.display = mode === 'static' ? '' : 'none';
+        }
+
+        function onPlatformChange() {
+            // Future: update UI based on platform
+        }
+
+        function getCampaignFormData() {
+            return {
+                name: document.getElementById('camp-name').value.trim() || 'Default Campaign',
+                platform: document.getElementById('camp-platform').value,
+                mode: currentMode,
+                user_prompt: document.getElementById('camp-prompt').value.trim(),
+                additional_notes: document.getElementById('camp-notes').value.trim(),
+                message_template: document.getElementById('camp-template').value.trim(),
+                sender_username: document.getElementById('camp-username').value.trim(),
+                sender_password: document.getElementById('camp-password').value.trim(),
+                daily_limit: parseInt(document.getElementById('camp-daily').value) || 50,
+                session_limit: parseInt(document.getElementById('camp-session').value) || 15,
+                delay_min: parseInt(document.getElementById('camp-delay-min').value) || 45,
+                delay_max: parseInt(document.getElementById('camp-delay-max').value) || 180,
+            };
+        }
+
+        function loadCampaignIntoForm(c) {
+            currentCampaignId = c.id;
+            document.getElementById('camp-name').value = c.name || '';
+            document.getElementById('camp-platform').value = c.platform || 'instagram';
+            setMode(c.mode || 'dynamic');
+            document.getElementById('camp-prompt').value = c.user_prompt || '';
+            document.getElementById('camp-notes').value = c.additional_notes || '';
+            document.getElementById('camp-template').value = c.message_template || '';
+            document.getElementById('camp-username').value = c.sender_username || '';
+            document.getElementById('camp-password').value = c.sender_password ? '********' : '';
+            document.getElementById('camp-daily').value = c.daily_limit || 50;
+            document.getElementById('camp-session').value = c.session_limit || 15;
+            document.getElementById('camp-delay-min').value = c.delay_min || 45;
+            document.getElementById('camp-delay-max').value = c.delay_max || 180;
+        }
+
+        async function saveCampaign() {
+            const data = getCampaignFormData();
+            // Don't overwrite password if user didn't change it
+            if (data.sender_password === '********') { delete data.sender_password; }
+
+            const btn = document.getElementById('btn-save-campaign');
+            btn.disabled = true; btn.textContent = 'Saving...';
+
+            try {
+                let url = '/api/campaigns';
+                let method = 'POST';
+                if (currentCampaignId) {
+                    url = '/api/campaigns/' + currentCampaignId;
+                    method = 'PUT';
+                }
+                const res = await fetch(url, {
+                    method: method,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                const result = await res.json();
+                if (result.error) {
+                    showToast(result.error, 'error');
+                } else {
+                    currentCampaignId = result.id;
+                    showToast('Campaign saved', 'success');
+                    loadCampaigns();
+                }
+            } catch (e) {
+                showToast('Failed to save campaign', 'error');
+            }
+            btn.disabled = false; btn.textContent = 'Save Campaign';
+        }
+
+        async function loadCampaigns() {
+            try {
+                const res = await fetch('/api/campaigns');
+                const campaigns = await res.json();
+                const listEl = document.getElementById('campaigns-list');
+                if (!campaigns.length) {
+                    listEl.innerHTML = '<div style="color: #525252; font-size: 0.875rem;">No campaigns yet. Configure one above and save.</div>';
+                    return;
+                }
+                listEl.innerHTML = campaigns.map(c => `
+                    <div class="campaign-card ${c.is_active ? 'active-campaign' : ''}">
+                        <div class="campaign-info">
+                            <div class="campaign-name">${esc(c.name)} ${c.is_active ? '<span class="badge badge-sent">Active</span>' : ''}</div>
+                            <div class="campaign-meta">${esc(c.platform)} / ${esc(c.mode)} -- ${c.sender_username ? '@' + esc(c.sender_username) : 'No sender'}</div>
+                        </div>
+                        <div style="display: flex; gap: 0.5rem;">
+                            <button class="btn btn-secondary" onclick="editCampaign(${c.id})" style="font-size: 0.75rem; padding: 0.25rem 0.625rem;">Edit</button>
+                            <button class="btn ${c.is_active ? 'btn-danger' : 'btn-success'}" onclick="toggleCampaignActive(${c.id}, ${!c.is_active})" style="font-size: 0.75rem; padding: 0.25rem 0.625rem;">
+                                ${c.is_active ? 'Deactivate' : 'Activate'}
+                            </button>
+                            <button class="btn btn-secondary" onclick="deleteCampaign(${c.id})" style="font-size: 0.75rem; padding: 0.25rem 0.625rem; color: #f87171;">Delete</button>
+                        </div>
+                    </div>
+                `).join('');
+            } catch (e) {
+                console.error('Failed to load campaigns', e);
+            }
+        }
+
+        async function editCampaign(id) {
+            try {
+                const res = await fetch('/api/campaigns/' + id);
+                const c = await res.json();
+                if (c.error) { showToast(c.error, 'error'); return; }
+                loadCampaignIntoForm(c);
+                showToast('Campaign loaded for editing', 'info');
+                window.scrollTo(0, 0);
+            } catch (e) { showToast('Failed to load campaign', 'error'); }
+        }
+
+        async function toggleCampaignActive(id, active) {
+            try {
+                const res = await fetch('/api/campaigns/' + id, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ is_active: active })
+                });
+                const data = await res.json();
+                if (data.error) { showToast(data.error, 'error'); return; }
+                showToast(active ? 'Campaign activated' : 'Campaign deactivated', 'success');
+                loadCampaigns();
+            } catch (e) { showToast('Failed to update campaign', 'error'); }
+        }
+
+        async function deleteCampaign(id) {
+            if (!confirm('Delete this campaign?')) return;
+            try {
+                const res = await fetch('/api/campaigns/' + id, { method: 'DELETE' });
+                const data = await res.json();
+                if (data.ok) {
+                    if (currentCampaignId === id) { currentCampaignId = null; }
+                    showToast('Campaign deleted', 'success');
+                    loadCampaigns();
+                } else {
+                    showToast(data.error || 'Delete failed', 'error');
+                }
+            } catch (e) { showToast('Failed to delete campaign', 'error'); }
+        }
+
+        async function previewMessage() {
+            const data = getCampaignFormData();
+            const btn = document.getElementById('btn-preview');
+            btn.disabled = true; btn.textContent = 'Generating...';
+            try {
+                const res = await fetch('/api/agent/preview', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                const initial = await res.json();
+                if (initial.error) {
+                    document.getElementById('preview-text').textContent = 'Error: ' + initial.error;
+                    document.getElementById('preview-meta').textContent = '';
+                    document.getElementById('preview-result').style.display = '';
+                    btn.disabled = false; btn.textContent = 'Preview Message';
+                    return;
+                }
+                // Static mode returns immediately with status=done
+                if (initial.status === 'done') {
+                    document.getElementById('preview-text').textContent = initial.message;
+                    document.getElementById('preview-meta').textContent = initial.chars + ' characters | Mode: ' + initial.mode + ' | Lead: ' + (initial.lead_name || 'N/A');
+                    document.getElementById('preview-result').style.display = '';
+                    btn.disabled = false; btn.textContent = 'Preview Message';
+                    return;
+                }
+                // Dynamic mode - poll for result
+                const taskId = initial.task_id;
+                let elapsed = 0;
+                const poll = setInterval(async () => {
+                    elapsed += 3;
+                    btn.textContent = 'Generating... (' + elapsed + 's)';
+                    try {
+                        const pr = await fetch('/api/agent/preview/' + taskId);
+                        const pdata = await pr.json();
+                        if (pdata.status === 'generating') return;
+                        clearInterval(poll);
+                        if (pdata.status === 'done') {
+                            document.getElementById('preview-text').textContent = pdata.message;
+                            document.getElementById('preview-meta').textContent = pdata.chars + ' characters | Mode: ' + pdata.mode + ' | Lead: ' + (pdata.lead_name || 'N/A');
+                            document.getElementById('preview-result').style.display = '';
+                        } else {
+                            document.getElementById('preview-text').textContent = 'Error: ' + (pdata.error || 'Unknown error');
+                            document.getElementById('preview-meta').textContent = '';
+                            document.getElementById('preview-result').style.display = '';
+                        }
+                        btn.disabled = false; btn.textContent = 'Preview Message';
+                    } catch (pe) {
+                        clearInterval(poll);
+                        showToast('Preview polling failed', 'error');
+                        btn.disabled = false; btn.textContent = 'Preview Message';
+                    }
+                }, 3000);
+            } catch (e) {
+                showToast('Preview failed', 'error');
+                btn.disabled = false; btn.textContent = 'Preview Message';
+            }
+        }
+
+        async function dryRun() {
+            const data = getCampaignFormData();
+            const btn = document.getElementById('btn-dry-run');
+            btn.disabled = true; btn.textContent = 'Running...';
+            try {
+                const res = await fetch('/api/agent/dry-run', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                const initial = await res.json();
+                if (initial.error) {
+                    showToast('Dry run error: ' + initial.error, 'error');
+                    btn.disabled = false; btn.textContent = 'Dry Run (1 Lead)';
+                    return;
+                }
+                // Static mode returns immediately
+                if (initial.status === 'done') {
+                    showToast('Dry run complete -- message: ' + (initial.message || '').substring(0, 80) + '...', 'success');
+                    document.getElementById('preview-text').textContent = initial.message;
+                    document.getElementById('preview-meta').textContent =
+                        (initial.chars || 0) + ' chars | Would send to: @' + (initial.handle || 'N/A') + ' | Mode: ' + (initial.mode || 'dynamic');
+                    document.getElementById('preview-result').style.display = '';
+                    btn.disabled = false; btn.textContent = 'Dry Run (1 Lead)';
+                    return;
+                }
+                // Dynamic mode - poll for result
+                const taskId = initial.task_id;
+                let elapsed = 0;
+                const poll = setInterval(async () => {
+                    elapsed += 3;
+                    btn.textContent = 'Running... (' + elapsed + 's)';
+                    try {
+                        const pr = await fetch('/api/agent/preview/' + taskId);
+                        const pdata = await pr.json();
+                        if (pdata.status === 'generating') return;
+                        clearInterval(poll);
+                        if (pdata.status === 'done') {
+                            showToast('Dry run complete -- message: ' + (pdata.message || '').substring(0, 80) + '...', 'success');
+                            document.getElementById('preview-text').textContent = pdata.message;
+                            document.getElementById('preview-meta').textContent =
+                                (pdata.chars || 0) + ' chars | Would send to: @' + (pdata.handle || 'N/A') + ' | Mode: ' + (pdata.mode || 'dynamic');
+                            document.getElementById('preview-result').style.display = '';
+                        } else {
+                            showToast('Dry run error: ' + (pdata.error || 'Unknown error'), 'error');
+                        }
+                        btn.disabled = false; btn.textContent = 'Dry Run (1 Lead)';
+                    } catch (pe) {
+                        clearInterval(poll);
+                        showToast('Dry run polling failed', 'error');
+                        btn.disabled = false; btn.textContent = 'Dry Run (1 Lead)';
+                    }
+                }, 3000);
+            } catch (e) {
+                showToast('Dry run failed', 'error');
+                btn.disabled = false; btn.textContent = 'Dry Run (1 Lead)';
+            }
         }
 
         // ---- Settings ----
@@ -549,7 +1145,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 } else {
                     showToast('Imported ' + data.imported + ' leads from "' + canvasName + '"', 'success');
                     progressText.textContent = 'Done -- ' + data.imported + ' leads imported' + (data.skipped ? ' (' + data.skipped + ' duplicates skipped)' : '');
-                    // Refresh stats on dashboard
                     loadStats();
                     loadLeads();
                 }
@@ -580,7 +1175,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         // ---- Init ----
         loadStats();
         loadLeads();
-        setInterval(loadStats, 10000);
+        setInterval(loadStats, 15000);
+
+        // Check agent status on load
+        (async function() {
+            try {
+                const res = await fetch('/api/agent/status');
+                const data = await res.json();
+                updateAgentUI(data.state);
+                if (data.state !== 'idle' && data.state !== 'stopped') {
+                    startActivityPolling();
+                    startStatusPolling();
+                }
+            } catch(e) {}
+        })();
     </script>
 </body>
 </html>"""
@@ -619,17 +1227,292 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
         leads = store.get_leads(limit=limit)
         return jsonify(leads)
 
+    # ---- Campaigns ----
+
+    @app.route("/api/campaigns", methods=["GET"])
+    def api_campaigns_list():  # type: ignore[no-untyped-def]
+        campaigns = store.get_campaigns()
+        return jsonify(campaigns)
+
+    @app.route("/api/campaigns", methods=["POST"])
+    def api_campaigns_create():  # type: ignore[no-untyped-def]
+        body = request.get_json(force=True, silent=True) or {}
+        required = ["name"]
+        for f in required:
+            if not body.get(f):
+                return jsonify({"error": f"'{f}' is required"}), 400
+        try:
+            campaign = store.create_campaign(body)
+            return jsonify(campaign), 201
+        except Exception as e:
+            logger.error("Failed to create campaign: %s", e)
+            return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/campaigns/<int:cid>", methods=["GET"])
+    def api_campaign_get(cid):  # type: ignore[no-untyped-def]
+        c = store.get_campaign(cid)
+        if not c:
+            return jsonify({"error": "Campaign not found"}), 404
+        return jsonify(c)
+
+    @app.route("/api/campaigns/<int:cid>", methods=["PUT"])
+    def api_campaign_update(cid):  # type: ignore[no-untyped-def]
+        body = request.get_json(force=True, silent=True) or {}
+        try:
+            updated = store.update_campaign(cid, body)
+            if not updated:
+                return jsonify({"error": "Campaign not found"}), 404
+            return jsonify(updated)
+        except Exception as e:
+            logger.error("Failed to update campaign %d: %s", cid, e)
+            return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/campaigns/<int:cid>", methods=["DELETE"])
+    def api_campaign_delete(cid):  # type: ignore[no-untyped-def]
+        ok = store.delete_campaign(cid)
+        if ok:
+            return jsonify({"ok": True})
+        return jsonify({"error": "Campaign not found"}), 404
+
     # ---- Agent ----
 
     @app.route("/api/agent/start", methods=["POST"])
     def api_agent_start():  # type: ignore[no-untyped-def]
-        # TODO: Start agent in background thread
-        return jsonify({"status": "started"})
+        global _agent_engine, _agent_thread
+        with _agent_lock:
+            if _agent_engine:
+                from openreach.agent.engine import AgentState
+                if _agent_engine.state not in (AgentState.IDLE, AgentState.STOPPED, AgentState.ERROR):
+                    return jsonify({"error": "Agent is already running"}), 400
+
+            # Find active campaign
+            campaign = store.get_active_campaign()
+            if not campaign:
+                return jsonify({"error": "No active campaign. Go to Campaign tab and activate one."}), 400
+
+            # Get unreached leads with instagram handles
+            unsent_leads = [
+                l for l in store.get_unreached_leads(limit=10000)
+                if l.get("instagram_handle")
+            ]
+
+            if not unsent_leads:
+                return jsonify({"error": "No unsent leads with Instagram handles available"}), 400
+
+            from openreach.llm.client import OllamaClient
+            from openreach.browser.session import BrowserSession
+            from openreach.agent.engine import AgentEngine
+
+            llm_cfg = cfg.get("llm", {})
+            llm = OllamaClient(
+                model=llm_cfg.get("model", "qwen3:4b"),
+                base_url=llm_cfg.get("base_url", "http://localhost:11434"),
+                temperature=llm_cfg.get("temperature", 0.7),
+            )
+            browser = BrowserSession(config=cfg)
+            _agent_engine = AgentEngine(llm=llm, browser=browser, store=store)
+
+            def _run():
+                try:
+                    asyncio.run(_agent_engine.start(campaign, unsent_leads))
+                except Exception as e:
+                    logger.error("Agent thread error: %s", e)
+
+            _agent_thread = threading.Thread(target=_run, daemon=True)
+            _agent_thread.start()
+
+        return jsonify({"status": "started", "leads_queued": len(unsent_leads)})
 
     @app.route("/api/agent/stop", methods=["POST"])
     def api_agent_stop():  # type: ignore[no-untyped-def]
-        # TODO: Signal agent to stop
+        global _agent_engine
+        with _agent_lock:
+            if _agent_engine:
+                _agent_engine.stop()
         return jsonify({"status": "stopping"})
+
+    @app.route("/api/agent/status")
+    def api_agent_status():  # type: ignore[no-untyped-def]
+        with _agent_lock:
+            if _agent_engine:
+                st = _agent_engine.stats
+                stats_dict = {
+                    "messages_sent": st.messages_sent,
+                    "messages_failed": st.messages_failed,
+                    "leads_processed": st.leads_processed,
+                }
+                return jsonify({
+                    "state": _agent_engine.state.value if hasattr(_agent_engine.state, 'value') else str(_agent_engine.state),
+                    "stats": stats_dict,
+                })
+        return jsonify({"state": "idle", "stats": {}})
+
+    # ---- Activity Log ----
+
+    @app.route("/api/activity")
+    def api_activity():  # type: ignore[no-untyped-def]
+        after_id = request.args.get("after_id", 0, type=int)
+        limit = request.args.get("limit", 100, type=int)
+        entries = store.get_activity_log(after_id=after_id, limit=limit)
+        return jsonify(entries)
+
+    # ---- Preview & Dry Run (Async Background Tasks) ----
+
+    @app.route("/api/agent/preview", methods=["POST"])
+    def api_agent_preview():  # type: ignore[no-untyped-def]
+        body = request.get_json(force=True, silent=True) or {}
+        mode = body.get("mode", "dynamic")
+
+        # Grab a sample lead
+        all_leads = store.get_leads(limit=1)
+        if not all_leads:
+            return jsonify({"error": "No leads in database. Import some first."}), 400
+
+        lead = all_leads[0]
+        from openreach.llm.prompts import build_static_message, build_dynamic_prompt, build_system_prompt
+
+        if mode == "static":
+            template = body.get("message_template", "")
+            if not template:
+                return jsonify({"error": "No message template provided"}), 400
+            msg = build_static_message(template, lead)
+            return jsonify({
+                "message": msg,
+                "chars": len(msg),
+                "mode": "static",
+                "lead_name": lead.get("name", ""),
+                "status": "done",
+            })
+
+        # Dynamic mode - start background generation
+        import uuid
+        task_id = str(uuid.uuid4())[:8]
+        with _preview_lock:
+            _preview_tasks[task_id] = {"status": "generating", "result": None}
+
+        def _generate_preview():
+            try:
+                from openreach.llm.client import OllamaClient
+                system = build_system_prompt(body)
+                user_msg = build_dynamic_prompt(lead, None)
+                llm_cfg = cfg.get("llm", {})
+                llm = OllamaClient(
+                    model=llm_cfg.get("model", "qwen3:4b"),
+                    base_url=llm_cfg.get("base_url", "http://localhost:11434"),
+                    temperature=llm_cfg.get("temperature", 0.7),
+                )
+                msg = llm.generate_sync(prompt=user_msg, system=system)
+                import re as _re
+                msg = _re.sub(r'<think>.*?</think>', '', msg, flags=_re.DOTALL).strip()
+                msg = msg.strip('"').strip("'")
+                with _preview_lock:
+                    _preview_tasks[task_id] = {
+                        "status": "done",
+                        "result": {
+                            "message": msg,
+                            "chars": len(msg),
+                            "mode": "dynamic",
+                            "lead_name": lead.get("name", ""),
+                        },
+                    }
+            except Exception as e:
+                logger.error("Preview generation failed: %s", e)
+                with _preview_lock:
+                    _preview_tasks[task_id] = {
+                        "status": "error",
+                        "result": {"error": f"LLM generation failed: {e}"},
+                    }
+
+        t = threading.Thread(target=_generate_preview, daemon=True)
+        t.start()
+        return jsonify({"task_id": task_id, "status": "generating"})
+
+    @app.route("/api/agent/preview/<task_id>")
+    def api_agent_preview_poll(task_id: str):  # type: ignore[no-untyped-def]
+        with _preview_lock:
+            task = _preview_tasks.get(task_id)
+        if not task:
+            return jsonify({"error": "Task not found"}), 404
+        if task["status"] == "generating":
+            return jsonify({"status": "generating"})
+        # Done or error - return result and clean up
+        with _preview_lock:
+            _preview_tasks.pop(task_id, None)
+        return jsonify({"status": task["status"], **(task["result"] or {})})
+
+    @app.route("/api/agent/dry-run", methods=["POST"])
+    def api_agent_dry_run():  # type: ignore[no-untyped-def]
+        body = request.get_json(force=True, silent=True) or {}
+        mode = body.get("mode", "dynamic")
+
+        all_leads = store.get_leads(limit=1)
+        if not all_leads:
+            return jsonify({"error": "No leads in database. Import some first."}), 400
+
+        lead = all_leads[0]
+        handle = lead.get("instagram_handle", "unknown")
+        from openreach.llm.prompts import build_static_message, build_dynamic_prompt, build_system_prompt
+
+        if mode == "static":
+            template = body.get("message_template", "")
+            if not template:
+                return jsonify({"error": "No message template provided"}), 400
+            msg = build_static_message(template, lead)
+            store.log_activity(
+                campaign_id=None, session_id=None, level="info",
+                message=f"[DRY RUN] Would send to @{handle}: {msg[:100]}..."
+            )
+            return jsonify({
+                "message": msg, "chars": len(msg), "mode": "static",
+                "handle": handle, "lead_name": lead.get("name", ""),
+                "dry_run": True, "status": "done",
+            })
+
+        # Dynamic mode - background generation
+        import uuid
+        task_id = str(uuid.uuid4())[:8]
+        with _preview_lock:
+            _preview_tasks[task_id] = {"status": "generating", "result": None}
+
+        def _generate_dry_run():
+            try:
+                from openreach.llm.client import OllamaClient
+                system = build_system_prompt(body)
+                user_msg = build_dynamic_prompt(lead, None)
+                llm_cfg = cfg.get("llm", {})
+                llm = OllamaClient(
+                    model=llm_cfg.get("model", "qwen3:4b"),
+                    base_url=llm_cfg.get("base_url", "http://localhost:11434"),
+                    temperature=llm_cfg.get("temperature", 0.7),
+                )
+                msg = llm.generate_sync(prompt=user_msg, system=system)
+                import re as _re
+                msg = _re.sub(r'<think>.*?</think>', '', msg, flags=_re.DOTALL).strip()
+                msg = msg.strip('"').strip("'")
+                store.log_activity(
+                    campaign_id=None, session_id=None, level="info",
+                    message=f"[DRY RUN] Would send to @{handle}: {msg[:100]}..."
+                )
+                with _preview_lock:
+                    _preview_tasks[task_id] = {
+                        "status": "done",
+                        "result": {
+                            "message": msg, "chars": len(msg), "mode": "dynamic",
+                            "handle": handle, "lead_name": lead.get("name", ""),
+                            "dry_run": True,
+                        },
+                    }
+            except Exception as e:
+                logger.error("Dry run generation failed: %s", e)
+                with _preview_lock:
+                    _preview_tasks[task_id] = {
+                        "status": "error",
+                        "result": {"error": f"LLM generation failed: {e}"},
+                    }
+
+        t = threading.Thread(target=_generate_dry_run, daemon=True)
+        t.start()
+        return jsonify({"task_id": task_id, "status": "generating"})
 
     # ---- Settings ----
 

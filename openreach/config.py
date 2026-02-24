@@ -27,9 +27,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "daily_limit": 50,
         "session_limit": 15,
     },
-    "instagram": {
-        "username": "",
-        "password": "",
+    "platforms": {
+        "instagram": {
+            "username": "",
+            "password": "",
+        },
     },
     "cormass": {
         "api_key": "",
