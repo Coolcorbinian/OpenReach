@@ -49,7 +49,7 @@ if %errorlevel%==0 (
 where py >nul 2>&1
 if %errorlevel%==0 (
     for /f "tokens=*" %%i in ('py -3 --version 2^>^&1') do set PY_VER=%%i
-    echo   [CHECK] Found %PY_VER% (py launcher)
+    echo   [CHECK] Found %PY_VER% ^(py launcher^)
     py -3 -c "import sys; exit(0 if sys.version_info >= (3, 11) else 1)" 2>nul
     if !errorlevel!==0 (
         set "PY=py -3"
@@ -98,7 +98,7 @@ set "VENV_PIP=%~dp0.venv\Scripts\pip.exe"
 :: 3. Install / update dependencies
 :: ---------------------------------------------------------------
 if not exist "%~dp0.venv\.deps_installed" (
-    echo   [SETUP] Installing dependencies (first run, may take a minute)...
+    echo   [SETUP] Installing dependencies ^(first run, may take a minute^)...
     "%VENV_PIP%" install --quiet --upgrade pip >nul 2>&1
     "%VENV_PIP%" install --quiet -r "%~dp0requirements.txt"
     if %errorlevel% neq 0 (
@@ -122,7 +122,7 @@ if not exist "%~dp0.venv\.deps_installed" (
 :: 4. Install Playwright browser if needed
 :: ---------------------------------------------------------------
 if not exist "%~dp0.venv\.pw_installed" (
-    echo   [SETUP] Installing browser engine (first run, may take a minute)...
+    echo   [SETUP] Installing browser engine ^(first run, may take a minute^)...
     "%VENV_PY%" -m playwright install chromium >nul 2>&1
     if %errorlevel% neq 0 (
         echo.
@@ -150,7 +150,7 @@ set LAUNCH_ERR=%errorlevel%
 if %LAUNCH_ERR% neq 0 (
     echo.
     echo   ============================================================
-    echo   OpenReach exited with an error (code %LAUNCH_ERR%).
+    echo   OpenReach exited with an error ^(code %LAUNCH_ERR%^).
     echo   If you need help, visit:
     echo     https://github.com/Coolcorbinian/OpenReach/issues
     echo   ============================================================
