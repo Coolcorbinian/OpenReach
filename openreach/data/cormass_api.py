@@ -31,46 +31,101 @@ class CormassApiClient:
             "Content-Type": "application/json",
         }
 
+    def list_canvases(self) -> list[dict[str, Any]]:
+        """List all canvases accessible to this API key.
+
+        Returns:
+            List of canvas dicts with id, name, itemCount, createdAt, updatedAt.
+            Returns empty list on error.
+        """
+        url = f"{self.base_url}/canvases"
+
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                response = client.get(url, headers=self._headers())
+                response.raise_for_status()
+                data = response.json()
+                if not isinstance(data, list):
+                    logger.warning("Unexpected canvases response: %s", type(data))
+                    return []
+                return data
+        except httpx.HTTPStatusError as e:
+            logger.warning("Failed to list canvases: %s", e)
+            return []
+        except httpx.ConnectError:
+            logger.warning("Cannot reach Cormass API at %s", self.base_url)
+            return []
+
     def pull_canvas(self, canvas_id: int) -> list[dict[str, Any]]:
         """Pull all leads from a Cormass Leads canvas.
+
+        Canvas items have structure:
+            { data: {name, phone_number, full_address, ...}, source: {raw: {business_id, ...}} }
+
+        The actual lead fields live in source.raw (full) with data containing
+        user-edited overrides. We merge them: raw as base, data as override.
 
         Args:
             canvas_id: The canvas ID to pull from
 
         Returns:
-            List of lead dicts with business data
+            List of lead dicts ready for DataStore.add_leads()
         """
         url = f"{self.base_url}/canvases/{canvas_id}"
 
         with httpx.Client(timeout=self.timeout) as client:
             response = client.get(url, headers=self._headers())
             response.raise_for_status()
-            data = response.json()
+            resp = response.json()
 
-        # Parse canvas JSON to extract items
-        canvas_json = data.get("canvasJson")
-        if not canvas_json:
+        # The response has { canvas: { items: [...] } }
+        canvas = resp.get("canvas") or {}
+        items = canvas.get("items") or []
+
+        if not items:
             logger.warning("Canvas %d has no items", canvas_id)
             return []
 
-        items = canvas_json if isinstance(canvas_json, list) else canvas_json.get("items", [])
-
         leads = []
         for item in items:
+            if not isinstance(item, dict):
+                continue
+
+            # Merge source.raw as base, then data as overrides
+            raw = {}
+            source = item.get("source") or {}
+            if isinstance(source, dict):
+                raw = source.get("raw") or {}
+
+            data = item.get("data") or {}
+            enrichment = item.get("enrichment") or {}
+
+            # Raw is the base, data overrides any key present
+            merged = {**raw, **data}
+
+            # Build business_type from types array (e.g. ["Coffeeshop", "Cafe"])
+            types_val = merged.get("types") or []
+            if isinstance(types_val, list):
+                business_type = ", ".join(str(t) for t in types_val[:3])
+            else:
+                business_type = str(types_val)
+
             lead = {
-                "name": item.get("title") or item.get("name", ""),
-                "instagram_handle": _extract_instagram(item),
-                "business_type": item.get("type") or item.get("category", ""),
-                "location": item.get("address", ""),
-                "rating": item.get("rating"),
-                "review_count": item.get("reviews"),
-                "website": item.get("website", ""),
+                "name": str(merged.get("name") or "").strip(),
+                "instagram_handle": _extract_instagram(merged, enrichment),
+                "business_type": business_type.strip(),
+                "location": str(merged.get("full_address") or merged.get("address") or "").strip(),
+                "rating": _safe_float(merged.get("rating")),
+                "review_count": _safe_int(merged.get("review_count")),
+                "website": str(merged.get("website") or "").strip(),
                 "notes": "",
-                "cormass_business_id": item.get("businessId") or item.get("business_id", ""),
+                "cormass_business_id": str(merged.get("business_id") or merged.get("place_id") or "").strip(),
                 "cormass_canvas_id": canvas_id,
                 "source": "cormass_api",
             }
-            leads.append(lead)
+            # Only add leads that have at least a name or business_id
+            if lead["name"] or lead["cormass_business_id"]:
+                leads.append(lead)
 
         logger.info("Pulled %d leads from canvas %d", len(leads), canvas_id)
         return leads
@@ -141,25 +196,52 @@ class CormassApiClient:
             return []
 
     def check_connection(self) -> bool:
-        """Verify the API key works by hitting the status endpoint."""
-        url = f"{self.base_url}/api-keys"
-
+        """Verify the API key works by listing canvases (needs read_canvases permission)."""
         try:
-            with httpx.Client(timeout=10.0) as client:
-                response = client.get(url, headers=self._headers())
-                return response.status_code == 200
-        except (httpx.HTTPStatusError, httpx.ConnectError):
+            canvases = self.list_canvases()
+            # If we get a list (even empty), the auth worked
+            return isinstance(canvases, list)
+        except Exception:
             return False
 
 
-def _extract_instagram(item: dict[str, Any]) -> str:
-    """Try to extract Instagram handle from a lead item."""
+def _safe_float(val: Any) -> float | None:
+    """Safely convert a value to float."""
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(val: Any) -> int | None:
+    """Safely convert a value to int."""
+    if val is None:
+        return None
+    try:
+        return int(float(val))
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_instagram(item: dict[str, Any], enrichment: dict[str, Any] | None = None) -> str:
+    """Try to extract Instagram handle from a lead item and enrichment data."""
     # Direct field
     handle = item.get("instagram") or item.get("instagram_handle") or ""
     if handle:
         return handle.lstrip("@")
 
-    # From social links
+    # From enrichment socials (e.g. enrichment.socials.instagram)
+    if enrichment and isinstance(enrichment, dict):
+        socials = enrichment.get("socials") or {}
+        if isinstance(socials, dict):
+            ig = socials.get("instagram", "")
+            if ig:
+                ig = ig.rstrip("/").split("/")[-1]
+                return ig.lstrip("@")
+
+    # From social links in merged data
     socials = item.get("socialLinks") or item.get("social_links") or {}
     if isinstance(socials, dict):
         ig = socials.get("instagram", "")
