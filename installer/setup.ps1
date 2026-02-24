@@ -139,6 +139,43 @@ function Find-Git {
     return $script:HasGit
 }
 
+function Test-OllamaModelInstalled {
+    param([string]$ModelName)
+    # Check if the model is already pulled by querying ollama list
+    if (-not $script:HasOllama) { return $false }
+    try {
+        $listResult = Run-Process $script:OllamaPath @('list') -TimeoutSec 10 -Silent
+        if ($listResult.ExitCode -eq 0 -and $listResult.Stdout) {
+            # ollama list output has model names like "qwen3:4b" in the first column
+            $baseName = $ModelName.Split(':')[0]
+            foreach ($line in $listResult.Stdout -split "`n") {
+                if ($line -match [regex]::Escape($ModelName) -or ($line -match "^$([regex]::Escape($baseName))\s")) {
+                    Write-Log "Model '$ModelName' found in ollama list."
+                    return $true
+                }
+            }
+        }
+    } catch {
+        Write-Log "Could not check ollama list: $_"
+    }
+    Write-Log "Model '$ModelName' not found in ollama list."
+    return $false
+}
+
+function Test-PlaywrightInstalled {
+    # Check if Playwright Chromium is installed by looking for the marker or the browser binary
+    $venvDir = Join-Path $script:InstallDir '.venv'
+    $pwMarker = Join-Path $venvDir '.pw_installed'
+    if (Test-Path $pwMarker) { return $true }
+    # Also check common Playwright browser path
+    $pwBrowserPath = Join-Path $env:LOCALAPPDATA 'ms-playwright'
+    if (Test-Path $pwBrowserPath) {
+        $chromiumDirs = Get-ChildItem $pwBrowserPath -Directory -Filter 'chromium*' -ErrorAction SilentlyContinue
+        if ($chromiumDirs.Count -gt 0) { return $true }
+    }
+    return $false
+}
+
 function Download-File {
     param([string]$Url, [string]$OutFile, [System.Windows.Forms.ProgressBar]$Bar, [System.Windows.Forms.Label]$Status)
     Write-Log "Downloading $Url -> $OutFile"
@@ -590,16 +627,30 @@ function Update-ComponentCheck {
     # AI Model
     $mdlItem = New-Object System.Windows.Forms.ListViewItem("AI Model ($($script:SelectedModel))")
     $mdlSize = ($script:Models | Where-Object { $_.Name -eq $script:SelectedModel }).Size
-    $mdlItem.SubItems.Add('Required')
-    $mdlItem.SubItems.Add("Will download ($mdlSize)")
-    $mdlItem.ForeColor = [System.Drawing.Color]::FromArgb(200, 120, 0)
+    $script:ModelAlreadyInstalled = Test-OllamaModelInstalled $script:SelectedModel
+    if ($script:ModelAlreadyInstalled) {
+        $mdlItem.SubItems.Add('Installed')
+        $mdlItem.SubItems.Add('Already downloaded')
+        $mdlItem.ForeColor = [System.Drawing.Color]::FromArgb(0, 128, 0)
+    } else {
+        $mdlItem.SubItems.Add('Not found')
+        $mdlItem.SubItems.Add("Will download ($mdlSize)")
+        $mdlItem.ForeColor = [System.Drawing.Color]::FromArgb(200, 120, 0)
+    }
     $chkList.Items.Add($mdlItem)
 
     # Browser
     $brItem = New-Object System.Windows.Forms.ListViewItem('Playwright Chromium')
-    $brItem.SubItems.Add('Required')
-    $brItem.SubItems.Add('Will download (~150 MB)')
-    $brItem.ForeColor = [System.Drawing.Color]::FromArgb(200, 120, 0)
+    $script:PlaywrightAlreadyInstalled = Test-PlaywrightInstalled
+    if ($script:PlaywrightAlreadyInstalled) {
+        $brItem.SubItems.Add('Installed')
+        $brItem.SubItems.Add('Already installed')
+        $brItem.ForeColor = [System.Drawing.Color]::FromArgb(0, 128, 0)
+    } else {
+        $brItem.SubItems.Add('Not found')
+        $brItem.SubItems.Add('Will download (~150 MB)')
+        $brItem.ForeColor = [System.Drawing.Color]::FromArgb(200, 120, 0)
+    }
     $chkList.Items.Add($brItem)
 
     # Summary
@@ -607,10 +658,15 @@ function Update-ComponentCheck {
     if (-not $script:HasPython) { $downloads += 'Python' }
     if (-not $script:HasOllama) { $downloads += 'Ollama' }
     $downloads += 'OpenReach'
-    $downloads += "AI Model ($mdlSize)"
-    $downloads += 'Browser Engine'
+    if (-not $script:ModelAlreadyInstalled) { $downloads += "AI Model ($mdlSize)" }
+    if (-not $script:PlaywrightAlreadyInstalled) { $downloads += 'Browser Engine' }
 
-    $chkSummary.Text = "Click 'Install' to begin. The following will be downloaded:`r`n$($downloads -join ', ')`r`n`r`nThis may take 10-20 minutes depending on your internet speed."
+    $actionWord = if ($script:IsUpdate) { 'Update' } else { 'Install' }
+    if ($downloads.Count -gt 0) {
+        $chkSummary.Text = "Click '$actionWord' to begin. The following will be downloaded:`r`n$($downloads -join ', ')`r`n`r`nThis may take 10-20 minutes depending on your internet speed."
+    } else {
+        $chkSummary.Text = "Click '$actionWord' to begin. All components are already present.`r`nThe $($actionWord.ToLower()) should complete quickly."
+    }
 }
 
 # ========================== PAGE 4: Installing ==========================
@@ -831,8 +887,81 @@ function Start-Installation {
             Set-InstallProgress 85 'Browser engine ready' ''
             Test-Cancelled
 
-            # --- Update Step 4: Write version marker (85-100%) ---
-            Set-InstallProgress 95 'Finalizing update...' ''
+            # --- Update Step 4: Ensure AI model is pulled (85-95%) ---
+            if (-not $script:ModelAlreadyInstalled) {
+                Set-InstallProgress 86 "Downloading AI model ($($script:SelectedModel))..." 'This may take several minutes'
+                Add-InstallLog "AI model $($script:SelectedModel) not found. Pulling..."
+
+                # Start Ollama if not running
+                Find-Ollama | Out-Null
+                $ollamaRunning = $false
+                try {
+                    $testReq = Invoke-WebRequest -Uri 'http://localhost:11434/api/tags' -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
+                    $ollamaRunning = ($testReq.StatusCode -eq 200)
+                } catch { $ollamaRunning = $false }
+
+                if (-not $ollamaRunning -and $script:HasOllama) {
+                    Add-InstallLog 'Starting Ollama server...'
+                    try {
+                        Start-Process -FilePath $script:OllamaPath -ArgumentList 'serve' -WindowStyle Hidden
+                        for ($w = 0; $w -lt 15; $w++) {
+                            Start-Sleep -Seconds 1
+                            try {
+                                $testReq = Invoke-WebRequest -Uri 'http://localhost:11434/api/tags' -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+                                if ($testReq.StatusCode -eq 200) { $ollamaRunning = $true; break }
+                            } catch {}
+                            [System.Windows.Forms.Application]::DoEvents()
+                        }
+                    } catch {
+                        Add-InstallLog "WARNING: Could not start Ollama: $_"
+                    }
+                }
+
+                if ($ollamaRunning) {
+                    $pullJob = Start-Process -FilePath $script:OllamaPath -ArgumentList "pull $($script:SelectedModel)" -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $tempDir 'ollama_pull.log') -RedirectStandardError (Join-Path $tempDir 'ollama_pull_err.log')
+                    $script:ChildProcess = $pullJob
+                    $lastLog = ''
+                    while (-not $pullJob.HasExited) {
+                        Start-Sleep -Seconds 2
+                        [System.Windows.Forms.Application]::DoEvents()
+                        if ($script:Cancelled) {
+                            Add-InstallLog 'Cancelling model download...'
+                            try { $pullJob.Kill() } catch {}
+                            $script:ChildProcess = $null
+                            throw 'CANCELLED'
+                        }
+                        try {
+                            $logContent = Get-Content (Join-Path $tempDir 'ollama_pull.log') -Tail 1 -ErrorAction SilentlyContinue
+                            if ($logContent -and $logContent -ne $lastLog) {
+                                $lastLog = $logContent
+                                $instDetail.Text = $logContent
+                                [System.Windows.Forms.Application]::DoEvents()
+                            }
+                        } catch {}
+                        if ($instBar.Value -lt 94) {
+                            $instBar.Value++
+                            $instPctLabel.Text = "$($instBar.Value)%"
+                        }
+                    }
+                    $script:ChildProcess = $null
+                    if ($pullJob.ExitCode -eq 0) {
+                        Add-InstallLog "Model $($script:SelectedModel) downloaded successfully."
+                    } else {
+                        Add-InstallLog "WARNING: Model pull may have failed (exit code $($pullJob.ExitCode))."
+                        Add-InstallLog "You can pull it manually later: ollama pull $($script:SelectedModel)"
+                    }
+                } else {
+                    Add-InstallLog 'WARNING: Ollama is not running. Model download skipped.'
+                    Add-InstallLog "Run manually after update: ollama pull $($script:SelectedModel)"
+                }
+            } else {
+                Add-InstallLog "AI model $($script:SelectedModel) already installed. Skipping."
+            }
+            Set-InstallProgress 95 'AI model ready' ''
+            Test-Cancelled
+
+            # --- Update Step 5: Write version marker (95-100%) ---
+            Set-InstallProgress 97 'Finalizing update...' ''
             Add-InstallLog 'Update complete.'
 
             # Write update timestamp
