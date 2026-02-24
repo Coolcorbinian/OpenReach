@@ -1236,7 +1236,7 @@ function Start-Installation {
             $script:ChildProcess = $pullJob
             $lastLog = ''
             while (-not $pullJob.HasExited) {
-                Start-Sleep -Seconds 2
+                Start-Sleep -Seconds 1
                 [System.Windows.Forms.Application]::DoEvents()
                 if ($script:Cancelled) {
                     Add-InstallLog 'Cancelling model download...'
@@ -1244,20 +1244,33 @@ function Start-Installation {
                     $script:ChildProcess = $null
                     throw 'CANCELLED'
                 }
+                # Ollama outputs progress to stderr
                 try {
-                    $logContent = Get-Content (Join-Path $tempDir 'ollama_pull.log') -Tail 1 -ErrorAction SilentlyContinue
-                    if ($logContent -and $logContent -ne $lastLog) {
-                        $lastLog = $logContent
-                        $instDetail.Text = $logContent
-                        [System.Windows.Forms.Application]::DoEvents()
+                    $errLog = Join-Path $tempDir 'ollama_pull_err.log'
+                    if (Test-Path $errLog) {
+                        $logContent = Get-Content $errLog -Tail 1 -ErrorAction SilentlyContinue
+                        if ($logContent -and $logContent -ne $lastLog) {
+                            $lastLog = $logContent
+                            # Parse: "pulling abc123:  45% ... 1.1 GB/2.5 GB  8.6 MB/s  2m30s"
+                            if ($logContent -match '(\d+)%.*?([\d.]+\s*[GMKT]?B)\s*/\s*([\d.]+\s*[GMKT]?B)\s+([\d.]+\s*[GMKT]?B/s)\s+(\S+)') {
+                                $dlPct = [int]$Matches[1]
+                                $dlDone = $Matches[2]
+                                $dlTotal = $Matches[3]
+                                $dlSpeed = $Matches[4]
+                                $dlEta = $Matches[5]
+                                # Map model download pct (0-100) to progress bar range (85-94)
+                                $mappedPct = 85 + [Math]::Floor($dlPct * 9 / 100)
+                                $instBar.Value = [Math]::Min($mappedPct, 94)
+                                $instPctLabel.Text = "$($instBar.Value)%"
+                                $instStatus.Text = "Downloading AI model ($($script:SelectedModel))... $dlPct%"
+                                $instDetail.Text = "$dlDone / $dlTotal  |  $dlSpeed  |  ETA: $dlEta"
+                            } elseif ($logContent -match 'pulling|verifying|writing') {
+                                $instDetail.Text = $logContent.Trim()
+                            }
+                            [System.Windows.Forms.Application]::DoEvents()
+                        }
                     }
                 } catch {}
-
-                # Animate progress bar between 85-94
-                if ($instBar.Value -lt 94) {
-                    $instBar.Value++
-                    $instPctLabel.Text = "$($instBar.Value)%"
-                }
             }
             $script:ChildProcess = $null
             if ($pullJob.ExitCode -eq 0) {
