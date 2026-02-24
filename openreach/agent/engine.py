@@ -15,6 +15,7 @@ import asyncio
 import logging
 import random
 import time
+import traceback
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -104,15 +105,22 @@ class AgentEngine:
         # Start a DB session
         self._session_id = self.store.start_session()
         self._log("info", f"Agent starting -- {len(leads)} leads, platform={platform}, mode={mode}")
+        self._log("debug", f"Campaign config: delay={delay_min}-{delay_max}s, daily_limit={daily_limit}, session_limit={session_limit}")
+        self._log("debug", f"Browser headless={self.browser.headless}, slow_mo={self.browser.slow_mo}")
 
         try:
             # Launch browser
+            self._log("debug", "Launching Playwright browser...")
             await self.browser.launch(platform=platform)
+            self._log("debug", "Browser launched successfully, getting platform session...")
             platform_session = self.browser.get_platform_session(platform)
+            self._log("debug", f"Platform session created: {type(platform_session).__name__}")
 
             # Login if needed
             self.state = AgentState.LOGGING_IN
+            self._log("debug", "Checking if already logged in...")
             logged_in = await platform_session.is_logged_in()
+            self._log("debug", f"Login check result: logged_in={logged_in}")
 
             if not logged_in:
                 username = campaign.get("sender_username", "")
@@ -120,17 +128,21 @@ class AgentEngine:
 
                 if not username or not password:
                     self._log("error", "No sender credentials configured. Cannot log in.")
+                    self._log("debug", f"sender_username present: {bool(username)}, sender_password present: {bool(password)}")
                     self.state = AgentState.ERROR
                     return self._finalize("error")
 
                 self._log("info", f"Logging in as @{username}...")
+                self._log("debug", f"Calling platform_session.login() for @{username}")
                 success = await platform_session.login(username, password)
+                self._log("debug", f"Login returned: success={success}")
                 if not success:
                     self._log("error", f"Login failed for @{username}")
                     self.state = AgentState.ERROR
                     return self._finalize("error")
 
                 self._log("success", f"Logged in as @{username}")
+                self._log("debug", "Saving browser state after successful login...")
                 await self.browser.save_state(platform)
             else:
                 self._log("info", "Already logged in (using saved session)")
@@ -201,16 +213,20 @@ class AgentEngine:
 
                 except Exception as e:
                     self.state = AgentState.ERROR
-                    logger.error("Error processing lead %s: %s", lead_name, e)
+                    tb = traceback.format_exc()
+                    logger.error("Error processing lead %s: %s\n%s", lead_name, e, tb)
                     self.stats.messages_failed += 1
                     self.store.record_outreach(lead, "failed", error=str(e), campaign_id=campaign_id)
                     self._log("error", f"Error processing '{lead_name}': {e}")
+                    self._log("debug", f"Traceback for '{lead_name}':\n{tb}")
 
                 self.stats.leads_processed += 1
 
         except Exception as e:
-            logger.error("Fatal agent error: %s", e)
+            tb = traceback.format_exc()
+            logger.error("Fatal agent error: %s\n%s", e, tb)
             self._log("error", f"Fatal error: {e}")
+            self._log("debug", f"Fatal traceback:\n{tb}")
             self.state = AgentState.ERROR
 
         finally:
@@ -307,7 +323,7 @@ class AgentEngine:
 
     def _log(self, level: str, message: str) -> None:
         """Write to both Python logger and the activity log DB."""
-        log_fn = getattr(logger, level if level != "success" else "info", logger.info)
+        log_fn = getattr(logger, level if level not in ("success", "debug") else ("info" if level == "success" else "debug"), logger.info)
         log_fn(message)
 
         try:

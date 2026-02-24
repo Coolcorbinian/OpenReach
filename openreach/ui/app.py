@@ -152,6 +152,28 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         .activity-entry.level-error { color: #f87171; }
         .activity-entry.level-warning { color: #fbbf24; }
         .activity-entry.level-info { color: #94a3b8; }
+        .activity-entry.level-debug { color: #525252; font-style: italic; }
+
+        /* Verbose badge */
+        .verbose-badge { display: none; background: #7c3aed; color: #fff; font-size: 0.625rem;
+                         padding: 0.125rem 0.5rem; border-radius: 9999px; margin-left: 0.5rem;
+                         text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
+        .verbose-badge.active { display: inline-block; }
+
+        /* Toggle switch */
+        .toggle-row { display: flex; align-items: center; justify-content: space-between;
+                      padding: 0.75rem 0; }
+        .toggle-label { font-size: 0.875rem; font-weight: 500; color: #e5e5e5; }
+        .toggle-desc { font-size: 0.75rem; color: #737373; margin-top: 0.25rem; }
+        .toggle-switch { position: relative; width: 44px; height: 24px; flex-shrink: 0; }
+        .toggle-switch input { opacity: 0; width: 0; height: 0; }
+        .toggle-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+                         background: #404040; border-radius: 12px; transition: 0.2s; }
+        .toggle-slider:before { position: absolute; content: ''; height: 18px; width: 18px;
+                                left: 3px; bottom: 3px; background: #e5e5e5; border-radius: 50%;
+                                transition: 0.2s; }
+        .toggle-switch input:checked + .toggle-slider { background: #7c3aed; }
+        .toggle-switch input:checked + .toggle-slider:before { transform: translateX(20px); }
 
         /* Campaign form */
         .form-textarea { width: 100%; padding: 0.625rem 0.75rem; background: #0a0a0a;
@@ -192,6 +214,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="container">
         <header>
             <h1>Open<span>Reach</span></h1>
+            <span class="verbose-badge" id="verbose-badge">Verbose</span>
             <div class="status" id="agent-status">Agent: Idle</div>
         </header>
 
@@ -494,6 +517,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                     </div>
                 </div>
             </div>
+
+            <div class="section">
+                <h2>Debug Mode</h2>
+                <div class="toggle-row">
+                    <div>
+                        <div class="toggle-label">Verbose Logging</div>
+                        <div class="toggle-desc">Show detailed browser automation output in the Activity Log. Enable this to diagnose crashes and login failures.</div>
+                    </div>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="verbose-toggle" onchange="toggleVerbose(this.checked)">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
         </div>
 
         <div class="footer">
@@ -512,6 +549,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         let lastActivityId = 0;
         let activityPollTimer = null;
         let statusPollTimer = null;
+        let verboseMode = false;
 
         // ---- Tab switching ----
         function switchTab(tabId) {
@@ -646,7 +684,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
         async function pollActivity() {
             try {
-                const url = '/api/activity?after_id=' + lastActivityId;
+                const url = '/api/activity?after_id=' + lastActivityId + (verboseMode ? '&include_debug=1' : '');
                 const res = await fetch(url);
                 const entries = await res.json();
                 if (entries.length > 0) {
@@ -966,6 +1004,22 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             }
         }
 
+        // ---- Verbose mode ----
+        async function toggleVerbose(on) {
+            try {
+                await fetch('/api/settings/verbose', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ verbose: on })
+                });
+                verboseMode = on;
+                document.getElementById('verbose-badge').classList.toggle('active', on);
+                showToast('Verbose mode ' + (on ? 'enabled' : 'disabled'), 'success');
+                // Re-poll activity to pick up debug entries
+                if (on) { lastActivityId = 0; clearActivityView(); pollActivity(); }
+            } catch (e) { showToast('Failed to toggle verbose mode', 'error'); }
+        }
+
         // ---- Settings ----
         async function loadSettings() {
             try {
@@ -976,6 +1030,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 if (data.has_api_key) {
                     document.getElementById('api-key-input').placeholder = 'Key saved (enter new key to replace)';
                 }
+                // Verbose toggle
+                verboseMode = !!data.verbose;
+                document.getElementById('verbose-toggle').checked = verboseMode;
+                document.getElementById('verbose-badge').classList.toggle('active', verboseMode);
             } catch (e) { console.error('Failed to load settings', e); }
         }
 
@@ -1177,6 +1235,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         loadLeads();
         setInterval(loadStats, 15000);
 
+        // Load verbose state on startup
+        (async function() {
+            try {
+                const res = await fetch('/api/settings');
+                const data = await res.json();
+                verboseMode = !!data.verbose;
+                document.getElementById('verbose-badge').classList.toggle('active', verboseMode);
+            } catch(e) {}
+        })();
+
         // Check agent status on load
         (async function() {
             try {
@@ -1201,6 +1269,41 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
     app = Flask(__name__)
     cfg = config or load_config()
     store = DataStore(cfg.get("data", {}).get("db_path", ""))
+
+    # Configure Python logging based on verbose setting
+    verbose_raw = cfg.get("debug", {}).get("verbose", "False")
+    verbose = str(verbose_raw).lower() in ("true", "1", "yes")
+    log_level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+        force=True,
+    )
+    # Quiet down noisy libraries
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("werkzeug").setLevel(logging.WARNING)
+
+    # Custom handler that forwards browser/agent debug logs to the activity DB
+    class _ActivityDBHandler(logging.Handler):
+        """Forward log records from openreach.browser.* and openreach.agent.* to activity DB."""
+        def emit(self, record: logging.LogRecord) -> None:
+            if not record.name.startswith(("openreach.browser", "openreach.agent")):
+                return
+            level_map = {logging.DEBUG: "debug", logging.INFO: "info",
+                         logging.WARNING: "warning", logging.ERROR: "error"}
+            level = level_map.get(record.levelno, "info")
+            try:
+                store.log_activity(message=self.format(record), level=level)
+            except Exception:
+                pass
+
+    db_handler = _ActivityDBHandler()
+    db_handler.setLevel(logging.DEBUG)
+    db_handler.setFormatter(logging.Formatter("%(message)s"))
+    logging.getLogger("openreach.browser").addHandler(db_handler)
+    # Note: openreach.agent.engine uses _log() which already writes to DB,
+    # so we skip adding the handler there to avoid duplicates.
 
     def _get_client() -> CormassApiClient | None:
         """Build a CormassApiClient from current config, or None if no key."""
@@ -1316,7 +1419,14 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
                 try:
                     asyncio.run(_agent_engine.start(campaign, unsent_leads))
                 except Exception as e:
-                    logger.error("Agent thread error: %s", e)
+                    import traceback
+                    tb = traceback.format_exc()
+                    logger.error("Agent thread error: %s\n%s", e, tb)
+                    store.log_activity(
+                        message=f"Agent thread crashed: {e}",
+                        level="error",
+                        details=tb,
+                    )
 
             _agent_thread = threading.Thread(target=_run, daemon=True)
             _agent_thread.start()
@@ -1353,7 +1463,10 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
     def api_activity():  # type: ignore[no-untyped-def]
         after_id = request.args.get("after_id", 0, type=int)
         limit = request.args.get("limit", 100, type=int)
+        include_debug = request.args.get("include_debug", "0") == "1"
         entries = store.get_activity_log(after_id=after_id, limit=limit)
+        if not include_debug:
+            entries = [e for e in entries if e.get("level") != "debug"]
         return jsonify(entries)
 
     # ---- Preview & Dry Run (Async Background Tasks) ----
@@ -1516,6 +1629,17 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
 
     # ---- Settings ----
 
+    @app.route("/api/settings/verbose", methods=["POST"])
+    def api_verbose_toggle():  # type: ignore[no-untyped-def]
+        body = request.get_json(force=True, silent=True) or {}
+        verbose = bool(body.get("verbose", False))
+        save_config_value("debug.verbose", str(verbose))
+        # Reconfigure Python logging level on the fly
+        root = logging.getLogger()
+        root.setLevel(logging.DEBUG if verbose else logging.INFO)
+        logger.info("Verbose mode %s", "ENABLED" if verbose else "DISABLED")
+        return jsonify({"ok": True, "verbose": verbose})
+
     @app.route("/api/settings", methods=["GET"])
     def api_settings_get():  # type: ignore[no-untyped-def]
         current = load_config()
@@ -1528,10 +1652,13 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
                 masked = api_key[:8] + "*" * (len(api_key) - 12) + api_key[-4:]
             else:
                 masked = "*" * len(api_key)
+        verbose_raw = current.get("debug", {}).get("verbose", "False")
+        verbose = str(verbose_raw).lower() in ("true", "1", "yes")
         return jsonify({
             "has_api_key": bool(api_key),
             "api_key_masked": masked,
             "base_url": cormass.get("base_url", "https://cormass.com/wp-json/leads/v1"),
+            "verbose": verbose,
         })
 
     @app.route("/api/settings", methods=["POST"])

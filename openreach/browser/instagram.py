@@ -38,6 +38,7 @@ class InstagramSession(PlatformSession):
     async def dismiss_popups(self) -> None:
         """Dismiss common Instagram popups (cookies, notifications, etc.)."""
         page = self._page
+        logger.debug("dismiss_popups() called -- current URL: %s", page.url)
 
         # Cookie consent -- "Allow all cookies" or "Decline optional cookies"
         for selector in [
@@ -55,7 +56,7 @@ class InstagramSession(PlatformSession):
                     logger.debug("Dismissed cookie popup via: %s", selector)
                     break
             except Exception:
-                pass
+                logger.debug("Cookie selector not found: %s", selector)
 
         # "Turn on Notifications" dialog
         for selector in [
@@ -70,7 +71,7 @@ class InstagramSession(PlatformSession):
                     logger.debug("Dismissed notification popup via: %s", selector)
                     break
             except Exception:
-                pass
+                logger.debug("Notification selector not found: %s", selector)
 
         # "Save Your Login Info?" dialog
         try:
@@ -80,7 +81,9 @@ class InstagramSession(PlatformSession):
                 await asyncio.sleep(0.5)
                 logger.debug("Dismissed 'Save Login Info' popup")
         except Exception:
-            pass
+            logger.debug("No 'Save Login Info' popup found")
+        
+        logger.debug("dismiss_popups() complete -- URL after: %s", page.url)
 
     # ------------------------------------------------------------------
     # Login
@@ -100,44 +103,66 @@ class InstagramSession(PlatformSession):
 
         try:
             logger.info("Navigating to Instagram login page...")
+            logger.debug("page.goto('https://www.instagram.com/accounts/login/', wait_until='domcontentloaded')")
             await page.goto("https://www.instagram.com/accounts/login/", wait_until="domcontentloaded")
+            logger.debug("Navigation complete -- URL: %s, title: %s", page.url, await page.title())
             await asyncio.sleep(2)
 
             # Dismiss cookie popup first
+            logger.debug("Dismissing pre-login popups...")
             await self.dismiss_popups()
             await asyncio.sleep(1)
 
             # Wait for login form
+            logger.debug("Waiting for login form elements...")
             username_input = page.locator('input[name="username"]')
             password_input = page.locator('input[name="password"]')
 
+            logger.debug("Waiting for username input to become visible (timeout=10s)...")
             await username_input.wait_for(state="visible", timeout=10000)
+            logger.debug("Username input visible. Checking password input...")
+            
+            try:
+                await password_input.wait_for(state="visible", timeout=5000)
+                logger.debug("Password input visible.")
+            except Exception as e:
+                logger.debug("Password input wait failed: %s", e)
 
             # Clear and type credentials
+            logger.debug("Clicking username input and typing credentials...")
             await username_input.click()
             await username_input.fill("")
             await page.keyboard.type(username, delay=40)
+            logger.debug("Username typed (%d chars)", len(username))
 
             await password_input.click()
             await password_input.fill("")
             await page.keyboard.type(password, delay=40)
+            logger.debug("Password typed (%d chars)", len(password))
 
             await asyncio.sleep(0.5)
 
             # Click Log In button
+            logger.debug("Looking for submit button...")
             login_btn = page.locator('button[type="submit"]').first
+            logger.debug("Clicking submit button...")
             await login_btn.click()
+            logger.debug("Submit clicked -- waiting for navigation...")
 
             # Wait for navigation after login
             await asyncio.sleep(4)
+            logger.debug("Post-login URL: %s", page.url)
 
             # Dismiss any post-login popups
+            logger.debug("Dismissing post-login popups (round 1)...")
             await self.dismiss_popups()
             await asyncio.sleep(1)
+            logger.debug("Dismissing post-login popups (round 2)...")
             await self.dismiss_popups()
 
             # Verify login by checking URL or profile elements
             current_url = page.url
+            logger.debug("Verifying login -- current URL: %s", current_url)
             if "/accounts/login" in current_url or "challenge" in current_url:
                 logger.error("Login may have failed -- still on login/challenge page: %s", current_url)
                 # Check for specific error messages
@@ -147,42 +172,56 @@ class InstagramSession(PlatformSession):
                         error_text = await error_el.text_content()
                         logger.error("Login error: %s", error_text)
                 except Exception:
-                    pass
+                    logger.debug("No visible error element found on login page")
                 return False
 
             logger.info("Instagram login successful for @%s", username)
             return True
 
-        except PlaywrightTimeout:
-            logger.error("Login timed out")
+        except PlaywrightTimeout as e:
+            logger.error("Login timed out: %s", e)
+            logger.debug("Timeout details -- URL at timeout: %s", page.url)
             return False
         except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
             logger.error("Login error: %s", e)
+            logger.debug("Login exception traceback:\n%s", tb)
             return False
 
     async def is_logged_in(self) -> bool:
         """Check if we're currently logged into Instagram."""
         page = self._page
         try:
+            logger.debug("is_logged_in() -- navigating to instagram.com...")
             await page.goto("https://www.instagram.com/", wait_until="domcontentloaded")
+            logger.debug("Navigation complete -- URL: %s", page.url)
             await asyncio.sleep(2)
+            logger.debug("Dismissing popups during login check...")
             await self.dismiss_popups()
 
             # If we're redirected to login page, we're not logged in
             if "/accounts/login" in page.url:
+                logger.debug("Redirected to login page -- not logged in")
                 return False
 
             # Look for elements that only appear when logged in
             # The navigation bar with profile icon, or the search icon
             nav_sel = 'svg[aria-label="Home"], a[href="/direct/inbox/"], svg[aria-label="Search"]'
+            logger.debug("Checking for logged-in nav elements: %s", nav_sel)
             try:
                 el = page.locator(nav_sel).first
-                return await el.is_visible(timeout=5000)
-            except Exception:
+                is_visible = await el.is_visible(timeout=5000)
+                logger.debug("Nav element visible: %s", is_visible)
+                return is_visible
+            except Exception as e:
+                logger.debug("Nav element check failed: %s", e)
                 return False
 
         except Exception as e:
+            import traceback
             logger.error("Error checking login status: %s", e)
+            logger.debug("is_logged_in traceback:\n%s", traceback.format_exc())
             return False
 
     # ------------------------------------------------------------------
@@ -209,6 +248,7 @@ class InstagramSession(PlatformSession):
 
         try:
             # Step 1: Navigate to profile
+            logger.debug("send_dm() -- navigating to profile @%s", handle)
             if not await self.navigate_to_profile(handle):
                 return False
 
@@ -216,24 +256,30 @@ class InstagramSession(PlatformSession):
             await self.dismiss_popups()
 
             # Step 2: Click Message button
+            logger.debug("Looking for Message button on @%s's profile...", handle)
             msg_btn = page.locator('div[role="button"]:has-text("Message")').first
             try:
                 await msg_btn.wait_for(state="visible", timeout=8000)
+                logger.debug("Message button found -- clicking...")
                 await msg_btn.click()
             except PlaywrightTimeout:
+                logger.debug("Primary Message button selector failed, trying alternatives...")
                 # Try alternative selectors
                 alt_btn = page.locator('a:has-text("Message"), button:has-text("Message")').first
                 try:
                     await alt_btn.wait_for(state="visible", timeout=3000)
+                    logger.debug("Alternative Message button found -- clicking...")
                     await alt_btn.click()
                 except Exception:
                     logger.error("Could not find Message button on @%s's profile", handle)
                     return False
 
             await asyncio.sleep(2)
+            logger.debug("Post-Message-click URL: %s", page.url)
             await self.dismiss_popups()
 
             # Step 3: Find the message input
+            logger.debug("Looking for message input textarea...")
             textarea = None
             for sel in [
                 'div[role="textbox"][contenteditable="true"]',
@@ -245,8 +291,10 @@ class InstagramSession(PlatformSession):
                     el = page.locator(sel).first
                     if await el.is_visible(timeout=3000):
                         textarea = el
+                        logger.debug("Message input found via selector: %s", sel)
                         break
                 except Exception:
+                    logger.debug("Message input selector not matched: %s", sel)
                     continue
 
             if not textarea:
@@ -254,10 +302,12 @@ class InstagramSession(PlatformSession):
                 return False
 
             # Step 4: Type and send
+            logger.debug("Typing message (%d chars)...", len(message))
             await textarea.click()
             await asyncio.sleep(0.3)
             await page.keyboard.type(message, delay=25)
             await asyncio.sleep(0.3)
+            logger.debug("Pressing Enter to send...")
             await page.keyboard.press("Enter")
 
             # Wait for message to appear
@@ -267,7 +317,9 @@ class InstagramSession(PlatformSession):
             return True
 
         except Exception as e:
+            import traceback
             logger.error("Failed to send DM to @%s: %s", handle, e)
+            logger.debug("send_dm traceback:\n%s", traceback.format_exc())
             return False
 
     # ------------------------------------------------------------------
@@ -287,30 +339,38 @@ class InstagramSession(PlatformSession):
         handle = handle.lstrip("@")
 
         try:
+            logger.debug("navigate_to_profile() -- going to instagram.com/%s/", handle)
             await page.goto(
                 f"https://www.instagram.com/{handle}/",
                 wait_until="domcontentloaded",
             )
+            logger.debug("Profile navigation complete -- URL: %s", page.url)
             await asyncio.sleep(2)
             await self.dismiss_popups()
 
             # Check if profile exists (not a 404)
-            if "Sorry, this page isn't available" in (await page.content()):
+            page_content = await page.content()
+            if "Sorry, this page isn't available" in page_content:
                 logger.warning("Profile @%s not found (404)", handle)
                 return False
 
             # Wait for profile header to load
+            logger.debug("Waiting for profile header section...")
             try:
                 header = page.locator('header section').first
                 await header.wait_for(state="visible", timeout=8000)
+                logger.debug("Profile header loaded for @%s", handle)
             except PlaywrightTimeout:
                 logger.warning("Profile page for @%s did not load properly", handle)
+                logger.debug("Current URL: %s, page title: %s", page.url, await page.title())
                 return False
 
             return True
 
         except Exception as e:
+            import traceback
             logger.error("Error navigating to @%s: %s", handle, e)
+            logger.debug("navigate_to_profile traceback:\n%s", traceback.format_exc())
             return False
 
     # ------------------------------------------------------------------

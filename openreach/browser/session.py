@@ -47,11 +47,14 @@ class BrowserSession:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         state_file = STATE_DIR / f"{platform}_state.json"
 
+        logger.debug("Starting Playwright async instance...")
         self._playwright = await async_playwright().start()
+        logger.debug("Playwright started. Launching Chromium (headless=%s, slow_mo=%s)...", self.headless, self.slow_mo)
         self._browser = await self._playwright.chromium.launch(
             headless=self.headless,
             slow_mo=self.slow_mo,
         )
+        logger.debug("Chromium browser process launched (pid=%s)", getattr(self._browser, '_impl_obj', {}) )
 
         ua = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -61,19 +64,23 @@ class BrowserSession:
 
         # Load saved state if available (preserves login cookies)
         if state_file.exists():
+            logger.debug("Loading saved browser state from %s", state_file)
             self._context = await self._browser.new_context(
                 storage_state=str(state_file),
                 viewport={"width": 1280, "height": 800},
                 user_agent=ua,
             )
         else:
+            logger.debug("No saved state found at %s -- creating fresh context", state_file)
             self._context = await self._browser.new_context(
                 viewport={"width": 1280, "height": 800},
                 user_agent=ua,
             )
 
+        logger.debug("Browser context created. Opening new page...")
         self._page = await self._context.new_page()
         logger.info("Browser launched (headless=%s, platform=%s)", self.headless, platform)
+        logger.debug("Page ready: %s", self._page.url)
         return self._page
 
     def get_platform_session(self, platform: str) -> PlatformSession:
