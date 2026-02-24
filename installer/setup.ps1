@@ -31,6 +31,8 @@ $script:HasOllama      = $false
 $script:HasGit         = $false
 $script:LogFile        = Join-Path $env:TEMP 'openreach_install.log'
 $script:Cancelled      = $false
+$script:IsUpdate       = $false
+$script:ChildProcess   = $null   # track spawned installers for cancellation
 
 # Model options: name, display, size, description
 $script:Models = @(
@@ -46,6 +48,14 @@ function Write-Log {
     param([string]$Message)
     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     "$ts  $Message" | Out-File -Append -FilePath $script:LogFile -Encoding utf8
+}
+
+function Test-Cancelled {
+    [System.Windows.Forms.Application]::DoEvents()
+    if ($script:Cancelled) {
+        Add-InstallLog 'Installation cancelled by user.'
+        throw 'CANCELLED'
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -140,6 +150,11 @@ function Download-File {
         try {
             $job = Start-BitsTransfer -Source $Url -Destination $OutFile -Asynchronous
             while ($job.JobState -eq 'Transferring' -or $job.JobState -eq 'Connecting') {
+                if ($script:Cancelled) {
+                    Remove-BitsTransfer $job -ErrorAction SilentlyContinue
+                    Write-Log 'Download cancelled by user (BITS).'
+                    return $false
+                }
                 if ($job.BytesTotal -gt 0 -and $Bar) {
                     $pct = [int](($job.BytesTransferred / $job.BytesTotal) * 100)
                     $Bar.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
@@ -320,7 +335,14 @@ function Show-Page {
 $p0 = New-Page
 
 $w0 = New-Object System.Windows.Forms.Label
-$w0.Text = "Welcome to the OpenReach installer.`r`n`r`nThis wizard will download and set up everything you need to run OpenReach on your computer.`r`n`r`nOpenReach uses a local AI model to generate personalized outreach messages and a browser engine to deliver them -- everything runs on your machine."
+# Detect if OpenReach is already installed (for update mode)
+$script:ExistingInstall = Test-Path (Join-Path $script:InstallDir 'openreach\__init__.py')
+
+$w0.Text = if ($script:ExistingInstall) {
+    "Welcome to the OpenReach updater.`r`n`r`nAn existing installation was detected at:`r`n$($script:InstallDir)`r`n`r`nThis wizard will update OpenReach to the latest version from GitHub. Your configuration and data will be preserved."
+} else {
+    "Welcome to the OpenReach installer.`r`n`r`nThis wizard will download and set up everything you need to run OpenReach on your computer.`r`n`r`nOpenReach uses a local AI model to generate personalized outreach messages and a browser engine to deliver them -- everything runs on your machine."
+}
 $w0.Location = New-Object System.Drawing.Point(30, 20)
 $w0.Size = New-Object System.Drawing.Size(570, 110)
 $p0.Controls.Add($w0)
@@ -353,6 +375,18 @@ $reqLabel.Location = New-Object System.Drawing.Point(30, 285)
 $reqLabel.Size = New-Object System.Drawing.Size(570, 20)
 $reqLabel.ForeColor = [System.Drawing.Color]::Gray
 $p0.Controls.Add($reqLabel)
+
+# Update mode indicator
+$updateBadge = New-Object System.Windows.Forms.Label
+$updateBadge.Text = 'UPDATE MODE'
+$updateBadge.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+$updateBadge.ForeColor = [System.Drawing.Color]::FromArgb(124, 58, 237)
+$updateBadge.BackColor = [System.Drawing.Color]::FromArgb(237, 233, 254)
+$updateBadge.TextAlign = 'MiddleCenter'
+$updateBadge.Location = New-Object System.Drawing.Point(30, 310)
+$updateBadge.Size = New-Object System.Drawing.Size(130, 22)
+$updateBadge.Visible = $script:ExistingInstall
+$p0.Controls.Add($updateBadge)
 
 # ========================== PAGE 1: License ==========================
 $p1 = New-Page
@@ -679,11 +713,146 @@ function Start-Installation {
     $btnBack.Enabled = $false
     $btnNext.Enabled = $false
     $btnCancel.Text = 'Cancel'
+    $btnCancel.Enabled = $true
+    $script:Cancelled = $false
+
+    # Check if this is update mode
+    $script:IsUpdate = Test-Path (Join-Path $script:InstallDir 'openreach\__init__.py')
 
     $tempDir = Join-Path $env:TEMP 'openreach_setup'
     New-Item -ItemType Directory -Path $tempDir -Force -ErrorAction SilentlyContinue | Out-Null
 
     try {
+
+        # ====== UPDATE MODE: skip dependency installs, just update code + packages ======
+        if ($script:IsUpdate) {
+            Set-InstallProgress 5 'Updating OpenReach...' 'Checking for updates'
+            Add-InstallLog '=== UPDATE MODE === Existing installation detected.'
+            Test-Cancelled
+
+            $installTarget = $script:InstallDir
+
+            # --- Update Step 1: Pull latest code (5-40%) ---
+            Find-Git | Out-Null
+            if ($script:HasGit -and (Test-Path (Join-Path $installTarget '.git'))) {
+                Set-InstallProgress 10 'Pulling latest changes...' 'Running git pull'
+                Add-InstallLog 'Pulling latest from GitHub (git)...'
+                $pullResult = Run-Process 'git' @('-C', "`"$installTarget`"", 'pull', '--ff-only') -TimeoutSec 120 -Silent
+                if ($pullResult.ExitCode -ne 0) {
+                    Add-InstallLog 'Git pull failed. Trying git stash + pull...'
+                    Run-Process 'git' @('-C', "`"$installTarget`"", 'stash') -TimeoutSec 30 -Silent
+                    $pullResult2 = Run-Process 'git' @('-C', "`"$installTarget`"", 'pull', '--ff-only') -TimeoutSec 120 -Silent
+                    if ($pullResult2.ExitCode -ne 0) {
+                        Add-InstallLog 'WARNING: Git pull failed again. Falling back to ZIP re-download.'
+                        $script:HasGit = $false
+                    } else {
+                        Add-InstallLog 'Updated via git pull (after stash).'
+                    }
+                } else {
+                    Add-InstallLog 'Updated via git pull.'
+                }
+            }
+            Test-Cancelled
+
+            if (-not $script:HasGit -or -not (Test-Path (Join-Path $installTarget '.git'))) {
+                Set-InstallProgress 10 'Downloading latest version...' 'Downloading ZIP from GitHub'
+                Add-InstallLog 'Downloading latest OpenReach ZIP...'
+                $zipPath = Join-Path $tempDir 'openreach_update.zip'
+                $zipUrl = 'https://github.com/Coolcorbinian/OpenReach/archive/refs/heads/master.zip'
+                $dlOk = Download-File -Url $zipUrl -OutFile $zipPath -Bar $instBar -Status $instDetail
+                if (-not $dlOk) { throw 'Failed to download update from GitHub.' }
+                Test-Cancelled
+
+                Add-InstallLog 'Extracting update...'
+                $extractDir = Join-Path $tempDir 'openreach_update_extract'
+                if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force }
+                Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
+
+                $innerDirs = Get-ChildItem $extractDir -Directory
+                $sourceDir = $null
+                foreach ($d in $innerDirs) {
+                    if (Test-Path (Join-Path $d.FullName 'openreach\__init__.py')) {
+                        $sourceDir = $d.FullName; break
+                    }
+                }
+                if (-not $sourceDir -and $innerDirs.Count -gt 0) { $sourceDir = $innerDirs[0].FullName }
+                if ($sourceDir) {
+                    # Preserve user data: .venv, config, data
+                    Copy-Item -Path (Join-Path $sourceDir '*') -Destination $installTarget -Recurse -Force -Exclude '.venv','.git'
+                    Add-InstallLog 'Code updated from ZIP (config and venv preserved).'
+                } else {
+                    throw 'Update ZIP does not contain expected structure.'
+                }
+            }
+            Set-InstallProgress 40 'Code updated' ''
+            Test-Cancelled
+
+            # --- Update Step 2: Reinstall packages if requirements changed (40-70%) ---
+            Set-InstallProgress 45 'Updating Python packages...' 'Checking for new dependencies'
+            Add-InstallLog 'Updating Python packages...'
+
+            Find-Python | Out-Null
+            $venvDir = Join-Path $installTarget '.venv'
+            $venvPy = Join-Path $venvDir 'Scripts\python.exe'
+            $venvPip = Join-Path $venvDir 'Scripts\pip.exe'
+
+            if (-not (Test-Path $venvPy)) {
+                Add-InstallLog 'Virtual environment missing, recreating...'
+                $venvResult = Run-Process $script:PythonPath @('-m', 'venv', "`"$venvDir`"") -TimeoutSec 120 -Silent
+                if ($venvResult.ExitCode -ne 0) { throw 'Failed to create virtual environment.' }
+            }
+            Test-Cancelled
+
+            $reqFile = Join-Path $installTarget 'requirements.txt'
+            if (Test-Path $reqFile) {
+                Run-Process $venvPy @('-m', 'pip', 'install', '--quiet', '--upgrade', 'pip') -TimeoutSec 120 -Silent
+                $pipResult = Run-Process $venvPip @('install', '--quiet', '--upgrade', '-r', "`"$reqFile`"") -TimeoutSec 600 -Silent
+                if ($pipResult.ExitCode -ne 0) {
+                    Add-InstallLog "WARNING: Package update had issues: $($pipResult.Stderr)"
+                } else {
+                    Add-InstallLog 'Python packages updated.'
+                }
+            }
+            # Refresh deps marker
+            'done' | Out-File (Join-Path $venvDir '.deps_installed') -Encoding utf8 -ErrorAction SilentlyContinue
+            Set-InstallProgress 70 'Packages updated' ''
+            Test-Cancelled
+
+            # --- Update Step 3: Update Playwright if needed (70-85%) ---
+            Set-InstallProgress 75 'Checking browser engine...' 'Updating Playwright if needed'
+            Add-InstallLog 'Updating Playwright Chromium...'
+            $pwResult = Run-Process $venvPy @('-m', 'playwright', 'install', 'chromium') -TimeoutSec 600 -Silent
+            if ($pwResult.ExitCode -eq 0) {
+                Add-InstallLog 'Playwright Chromium up to date.'
+            } else {
+                Add-InstallLog 'WARNING: Playwright update failed. Existing browser should still work.'
+            }
+            'done' | Out-File (Join-Path $venvDir '.pw_installed') -Encoding utf8 -ErrorAction SilentlyContinue
+            Set-InstallProgress 85 'Browser engine ready' ''
+            Test-Cancelled
+
+            # --- Update Step 4: Write version marker (85-100%) ---
+            Set-InstallProgress 95 'Finalizing update...' ''
+            Add-InstallLog 'Update complete.'
+
+            # Write update timestamp
+            $configDir = Join-Path $env:USERPROFILE '.openreach'
+            New-Item -ItemType Directory -Path $configDir -Force -ErrorAction SilentlyContinue | Out-Null
+            "updated=$(Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')" | Out-File (Join-Path $configDir '.last_update') -Encoding utf8
+
+            Set-InstallProgress 100 'Update complete!' ''
+            Add-InstallLog '--- Update complete! ---'
+
+            $doneTitle.Text = 'Update Complete!'
+            $doneSummary.Text = "OpenReach has been updated successfully.`r`n`r`nInstall location: $installTarget`r`nUpdated at: $(Get-Date -Format 'yyyy-MM-dd HH:mm')`r`n`r`nYour configuration and data have been preserved.`r`nYou can start using OpenReach right away."
+            $btnNext.Enabled = $true
+            $btnNext.Text = 'Finish'
+            $btnCancel.Enabled = $false
+            Show-Page 5
+            return
+        }
+
+        # ====== FRESH INSTALL MODE ======
 
         # --- Step 1: Install Python if needed (0-20%) ---
         if (-not $script:HasPython) {
@@ -694,6 +863,7 @@ function Start-Installation {
             $pyUrl = 'https://www.python.org/ftp/python/3.13.2/python-3.13.2-amd64.exe'
 
             $dlOk = Download-File -Url $pyUrl -OutFile $pyInstaller -Bar $instBar -Status $instDetail
+            Test-Cancelled
             if (-not $dlOk -or -not (Test-Path $pyInstaller)) {
                 Add-InstallLog 'ERROR: Python download failed.'
                 throw 'Failed to download Python. Please check your internet connection.'
@@ -732,6 +902,7 @@ function Start-Installation {
             Add-InstallLog "Python already installed: $($script:PythonPath)"
         }
         Set-InstallProgress 20 'Python ready' ''
+        Test-Cancelled
 
         # --- Step 2: Install Ollama if needed (20-35%) ---
         if (-not $script:HasOllama) {
@@ -742,6 +913,7 @@ function Start-Installation {
             $olUrl = 'https://ollama.com/download/OllamaSetup.exe'
 
             $dlOk = Download-File -Url $olUrl -OutFile $olInstaller -Bar $instBar -Status $instDetail
+            Test-Cancelled
             if (-not $dlOk -or -not (Test-Path $olInstaller)) {
                 throw 'Failed to download Ollama. Please check your internet connection.'
             }
@@ -769,6 +941,7 @@ function Start-Installation {
             Add-InstallLog "Ollama already installed: $($script:OllamaPath)"
         }
         Set-InstallProgress 35 'Ollama ready' ''
+        Test-Cancelled
 
         # --- Step 3: Download OpenReach (35-50%) ---
         Set-InstallProgress 37 'Downloading OpenReach...' 'Getting project files from GitHub'
@@ -803,7 +976,7 @@ function Start-Installation {
                 Add-InstallLog 'OpenReach already exists. Skipping download.'
             } else {
                 $zipPath = Join-Path $tempDir 'openreach.zip'
-                $zipUrl = 'https://github.com/Coolcorbinian/OpenReach/archive/refs/heads/main.zip'
+                $zipUrl = 'https://github.com/Coolcorbinian/OpenReach/archive/refs/heads/master.zip'
 
                 $dlOk = Download-File -Url $zipUrl -OutFile $zipPath -Bar $instBar -Status $instDetail
                 if (-not $dlOk) {
@@ -840,6 +1013,7 @@ function Start-Installation {
             }
         }
         Set-InstallProgress 50 'OpenReach downloaded' ''
+        Test-Cancelled
 
         # --- Step 4: Create venv and install packages (50-70%) ---
         Set-InstallProgress 52 'Setting up Python environment...' 'Creating virtual environment'
@@ -879,6 +1053,7 @@ function Start-Installation {
             Add-InstallLog 'WARNING: requirements.txt not found. Skipping package install.'
         }
         Set-InstallProgress 70 'Packages installed' ''
+        Test-Cancelled
 
         # --- Step 5: Install Playwright browser (70-80%) ---
         Set-InstallProgress 72 'Installing browser engine...' 'Downloading Chromium (~150 MB)'
@@ -892,6 +1067,7 @@ function Start-Installation {
             Add-InstallLog 'Playwright Chromium installed.'
         }
         Set-InstallProgress 80 'Browser engine ready' ''
+        Test-Cancelled
 
         # --- Step 6: Start Ollama and pull model (80-95%) ---
         Set-InstallProgress 82 'Setting up AI model...' 'Starting Ollama'
@@ -928,10 +1104,17 @@ function Start-Installation {
             # Pull model using ollama CLI (shows progress in our log via polling)
             $pullJob = Start-Process -FilePath $script:OllamaPath -ArgumentList "pull $($script:SelectedModel)" -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $tempDir 'ollama_pull.log') -RedirectStandardError (Join-Path $tempDir 'ollama_pull_err.log')
 
+            $script:ChildProcess = $pullJob
             $lastLog = ''
             while (-not $pullJob.HasExited) {
                 Start-Sleep -Seconds 2
                 [System.Windows.Forms.Application]::DoEvents()
+                if ($script:Cancelled) {
+                    Add-InstallLog 'Cancelling model download...'
+                    try { $pullJob.Kill() } catch {}
+                    $script:ChildProcess = $null
+                    throw 'CANCELLED'
+                }
                 try {
                     $logContent = Get-Content (Join-Path $tempDir 'ollama_pull.log') -Tail 1 -ErrorAction SilentlyContinue
                     if ($logContent -and $logContent -ne $lastLog) {
@@ -947,6 +1130,7 @@ function Start-Installation {
                     $instPctLabel.Text = "$($instBar.Value)%"
                 }
             }
+            $script:ChildProcess = $null
             if ($pullJob.ExitCode -eq 0) {
                 Add-InstallLog "Model $($script:SelectedModel) downloaded successfully."
             } else {
@@ -1044,18 +1228,26 @@ ui:
 
     } catch {
         $errMsg = $_.Exception.Message
-        Add-InstallLog "FATAL ERROR: $errMsg"
-        Set-InstallProgress $instBar.Value "Installation failed" $errMsg
-        $instStatus.ForeColor = [System.Drawing.Color]::Red
+        if ($errMsg -eq 'CANCELLED') {
+            Add-InstallLog 'Installation cancelled by user.'
+            Set-InstallProgress $instBar.Value 'Installation cancelled' 'You can run the installer again at any time.'
+            $instStatus.ForeColor = [System.Drawing.Color]::FromArgb(200, 120, 0)
+            $btnCancel.Text = 'Close'
+            $btnCancel.Enabled = $true
+        } else {
+            Add-InstallLog "FATAL ERROR: $errMsg"
+            Set-InstallProgress $instBar.Value "Installation failed" $errMsg
+            $instStatus.ForeColor = [System.Drawing.Color]::Red
 
-        [System.Windows.Forms.MessageBox]::Show(
-            "Installation encountered an error:`n`n$errMsg`n`nCheck the log at:`n$($script:LogFile)`n`nYou can try running the installer again.",
-            'OpenReach Setup - Error',
-            'OK',
-            'Error'
-        )
-        $btnCancel.Text = 'Close'
-        $btnCancel.Enabled = $true
+            [System.Windows.Forms.MessageBox]::Show(
+                "Installation encountered an error:`n`n$errMsg`n`nCheck the log at:`n$($script:LogFile)`n`nYou can try running the installer again.",
+                'OpenReach Setup - Error',
+                'OK',
+                'Error'
+            )
+            $btnCancel.Text = 'Close'
+            $btnCancel.Enabled = $true
+        }
     } finally {
         # Cleanup temp files (keep log)
         try {
@@ -1075,15 +1267,34 @@ $btnCancel.Add_Click({
         $form.Close()
         return
     }
+    # If we are on the install page (page 4) and cancel text is 'Close', just close
+    if ($script:CurrentPage -eq 4 -and $btnCancel.Text -eq 'Close') {
+        $form.Close()
+        return
+    }
+    $prompt = if ($script:CurrentPage -eq 4) {
+        'Are you sure you want to cancel the installation in progress?'
+    } else {
+        'Are you sure you want to cancel?'
+    }
     $result = [System.Windows.Forms.MessageBox]::Show(
-        'Are you sure you want to cancel the installation?',
+        $prompt,
         'OpenReach Setup',
         'YesNo',
         'Question'
     )
     if ($result -eq 'Yes') {
         $script:Cancelled = $true
-        $form.Close()
+        # If not on install page, just close the form immediately
+        if ($script:CurrentPage -ne 4) {
+            $form.Close()
+        }
+        # If on install page, the running install loop will pick up $Cancelled
+        # and throw CANCELLED, which the catch handler manages.
+        # Kill any running child process immediately
+        if ($script:ChildProcess -and -not $script:ChildProcess.HasExited) {
+            try { $script:ChildProcess.Kill() } catch {}
+        }
     }
 })
 
@@ -1118,9 +1329,12 @@ $btnNext.Add_Click({
             foreach ($rb in $script:ModelRadios) {
                 if ($rb.Checked) { $script:SelectedModel = $rb.Tag; break }
             }
+            # Re-check update mode based on final install dir
+            $script:IsUpdate = Test-Path (Join-Path $script:InstallDir 'openreach\__init__.py')
+            $script:ExistingInstall = $script:IsUpdate
             Update-ComponentCheck
             Show-Page 3
-            $btnNext.Text = 'Install'
+            $btnNext.Text = if ($script:IsUpdate) { 'Update' } else { 'Install' }
         }
         3 {
             # Component Check -> Installing
