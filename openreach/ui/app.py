@@ -122,7 +122,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
 
         <div class="footer">
-            <p>OpenReach v{{ version }} -- <a href="https://github.com/cormass/openreach">GitHub</a></p>
+            <p>OpenReach v{{ version }} -- <a href="https://github.com/Coolcorbinian/OpenReach">GitHub</a></p>
         </div>
     </div>
 

@@ -787,7 +787,7 @@ function Start-Installation {
             } elseif (Test-Path (Join-Path $installTarget 'openreach\__init__.py')) {
                 Add-InstallLog 'OpenReach already exists (no git). Skipping download.'
             } else {
-                $gitResult = Run-Process 'git' @('clone', 'https://github.com/cormass/openreach.git', "`"$installTarget`"") -TimeoutSec 300 -Silent
+                $gitResult = Run-Process 'git' @('clone', 'https://github.com/Coolcorbinian/OpenReach.git', "`"$installTarget`"") -TimeoutSec 300 -Silent
                 if ($gitResult.ExitCode -ne 0) {
                     Add-InstallLog 'Git clone failed. Falling back to ZIP download...'
                     $script:HasGit = $false
@@ -803,7 +803,7 @@ function Start-Installation {
                 Add-InstallLog 'OpenReach already exists. Skipping download.'
             } else {
                 $zipPath = Join-Path $tempDir 'openreach.zip'
-                $zipUrl = 'https://github.com/cormass/openreach/archive/refs/heads/main.zip'
+                $zipUrl = 'https://github.com/Coolcorbinian/OpenReach/archive/refs/heads/main.zip'
 
                 $dlOk = Download-File -Url $zipUrl -OutFile $zipPath -Bar $instBar -Status $instDetail
                 if (-not $dlOk) {
@@ -815,11 +815,26 @@ function Start-Installation {
                 if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force }
                 Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
 
-                # GitHub zips contain a folder like 'openreach-main/', move contents
-                $innerDir = Get-ChildItem $extractDir -Directory | Select-Object -First 1
-                if ($innerDir) {
+                # GitHub zips contain a single top-level folder (e.g. 'OpenReach-main/').
+                # Detect it reliably: look for the folder containing openreach/__init__.py.
+                $innerDirs = Get-ChildItem $extractDir -Directory
+                $sourceDir = $null
+                foreach ($d in $innerDirs) {
+                    if (Test-Path (Join-Path $d.FullName 'openreach\__init__.py')) {
+                        $sourceDir = $d.FullName
+                        break
+                    }
+                }
+                # Fallback: if no subfolder has the expected structure, use first directory
+                if (-not $sourceDir -and $innerDirs.Count -gt 0) {
+                    $sourceDir = $innerDirs[0].FullName
+                    Add-InstallLog "WARNING: Could not verify archive structure. Using: $($innerDirs[0].Name)"
+                }
+                if ($sourceDir) {
                     New-Item -ItemType Directory -Path $installTarget -Force | Out-Null
-                    Copy-Item -Path (Join-Path $innerDir.FullName '*') -Destination $installTarget -Recurse -Force
+                    Copy-Item -Path (Join-Path $sourceDir '*') -Destination $installTarget -Recurse -Force
+                } else {
+                    throw 'ZIP archive does not contain expected directory structure.'
                 }
                 Add-InstallLog 'OpenReach extracted.'
             }

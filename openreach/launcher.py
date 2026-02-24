@@ -34,12 +34,12 @@ FLASK_PORT = 5000
 
 def _banner() -> None:
     print()
-    print("  ╔══════════════════════════════════════════════════════════╗")
-    print("  ║                                                        ║")
-    print("  ║     O P E N R E A C H                                  ║")
-    print("  ║     Social Media Outreach Agent                        ║")
-    print("  ║                                                        ║")
-    print("  ╚══════════════════════════════════════════════════════════╝")
+    print("  +----------------------------------------------------------+")
+    print("  |                                                          |")
+    print("  |     O P E N R E A C H                                    |")
+    print("  |     Social Media Outreach Agent                          |")
+    print("  |                                                          |")
+    print("  +----------------------------------------------------------+")
     print()
 
 
@@ -407,7 +407,7 @@ def main() -> None:
         _fatal(
             f"An unexpected error occurred: {e}",
             "Please report this issue at:\n"
-            "      https://github.com/cormass/openreach/issues",
+            "      https://github.com/Coolcorbinian/OpenReach/issues",
         )
 
 

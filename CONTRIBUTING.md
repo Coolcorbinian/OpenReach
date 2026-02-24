@@ -6,7 +6,7 @@ Contributions are welcome. This document outlines the process and expectations.
 
 ```bash
 # Clone and set up
-git clone https://github.com/cormass/openreach.git
+git clone https://github.com/Coolcorbinian/OpenReach.git
 cd openreach
 
 # Create virtual environment

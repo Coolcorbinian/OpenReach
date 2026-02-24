@@ -1,4 +1,5 @@
 @echo off
+setlocal enabledelayedexpansion
 title OpenReach - Starting...
 color 0F
 mode con: cols=90 lines=35
@@ -18,48 +19,60 @@ echo.
 :: ---------------------------------------------------------------
 set "PY="
 
+:: Try each Python candidate; if found but version too low, continue
+:: trying the next candidate instead of giving up.
+
 where python >nul 2>&1
 if %errorlevel%==0 (
     for /f "tokens=*" %%i in ('python --version 2^>^&1') do set PY_VER=%%i
     echo   [CHECK] Found %PY_VER%
-    set "PY=python"
-    goto :check_version
+    python -c "import sys; exit(0 if sys.version_info >= (3, 11) else 1)" 2>nul
+    if !errorlevel!==0 (
+        set "PY=python"
+        goto :python_ok
+    )
+    echo   [CHECK] %PY_VER% is too old, trying next...
 )
 
 where python3 >nul 2>&1
 if %errorlevel%==0 (
     for /f "tokens=*" %%i in ('python3 --version 2^>^&1') do set PY_VER=%%i
     echo   [CHECK] Found %PY_VER%
-    set "PY=python3"
-    goto :check_version
+    python3 -c "import sys; exit(0 if sys.version_info >= (3, 11) else 1)" 2>nul
+    if !errorlevel!==0 (
+        set "PY=python3"
+        goto :python_ok
+    )
+    echo   [CHECK] %PY_VER% is too old, trying next...
 )
 
 where py >nul 2>&1
 if %errorlevel%==0 (
-    for /f "tokens=*" %%i in ('py --version 2^>^&1') do set PY_VER=%%i
-    echo   [CHECK] Found %PY_VER%
-    set "PY=py"
-    goto :check_version
+    for /f "tokens=*" %%i in ('py -3 --version 2^>^&1') do set PY_VER=%%i
+    echo   [CHECK] Found %PY_VER% (py launcher)
+    py -3 -c "import sys; exit(0 if sys.version_info >= (3, 11) else 1)" 2>nul
+    if !errorlevel!==0 (
+        set "PY=py -3"
+        goto :python_ok
+    )
+    echo   [CHECK] %PY_VER% is too old.
 )
 
-goto :no_python
+:: None of the candidates met the version requirement
+echo.
+echo   [ERROR] Python 3.11 or newer is required.
+if defined PY_VER echo           Best found: %PY_VER%
+echo.
+echo   Download Python: https://www.python.org/downloads/
+echo.
+echo   IMPORTANT: During installation, check the box that says
+echo              "Add Python to PATH"
+echo.
+pause
+exit /b 1
 
-:check_version
-:: Verify Python version is 3.11+
-%PY% -c "import sys; exit(0 if sys.version_info >= (3, 11) else 1)" 2>nul
-if %errorlevel% neq 0 (
-    echo.
-    echo   [ERROR] Python 3.11 or newer is required.
-    echo           You have: %PY_VER%
-    echo.
-    echo   Download Python: https://www.python.org/downloads/
-    echo.
-    echo   IMPORTANT: During installation, check the box that says
-    echo              "Add Python to PATH"
-    echo.
-    pause
-    exit /b 1
-)
+:python_ok
+echo   [  OK ] Using %PY% (%PY_VER%)
 
 :: ---------------------------------------------------------------
 :: 2. Create virtual environment if needed
@@ -139,7 +152,7 @@ if %LAUNCH_ERR% neq 0 (
     echo   ============================================================
     echo   OpenReach exited with an error (code %LAUNCH_ERR%).
     echo   If you need help, visit:
-    echo     https://github.com/cormass/openreach/issues
+    echo     https://github.com/Coolcorbinian/OpenReach/issues
     echo   ============================================================
     echo.
 )

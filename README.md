@@ -50,7 +50,7 @@ OpenReach automates cold DM outreach on Instagram using a local AI agent running
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/cormass/openreach.git
+git clone https://github.com/Coolcorbinian/OpenReach.git
 cd openreach
 
 # 2. Install dependencies
