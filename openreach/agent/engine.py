@@ -1,29 +1,27 @@
-"""Core agent loop -- orchestrates LLM planning with browser execution.
+"""Core agent loop -- prompt-driven LLM with browser tool-calling.
 
 The AgentEngine coordinates:
-1. Campaign configuration (platform, mode, prompt, credentials)
-2. Lead queue processing with rate limiting
-3. LLM message generation (dynamic mode) or template substitution (static mode)
-4. Social profile scraping for dynamic context
-5. Browser-based message delivery
-6. Activity logging for real-time UI feedback
+1. Task configuration (user prompt, lead context, LLM settings)
+2. Browser session management (Playwright lifecycle)
+3. Tool-calling loop: LLM decides actions -> tools execute -> results fed back
+4. Real-time streaming of reasoning + tool calls to the UI
+5. Activity logging and agent turn recording
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import random
 import time
 import traceback
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Callable, Awaitable
 
+from openreach.agent.tools import build_tool_registry
 from openreach.browser.session import BrowserSession
 from openreach.data.store import DataStore
-from openreach.llm.client import OllamaClient
-from openreach.llm.prompts import build_system_prompt, build_static_message, build_dynamic_prompt
+from openreach.llm.client import LLMClient, StreamChunk, ChunkType, AgentTurn
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +29,7 @@ logger = logging.getLogger(__name__)
 class AgentState(Enum):
     IDLE = "idle"
     STARTING = "starting"
-    LOGGING_IN = "logging_in"
-    PLANNING = "planning"
-    SCRAPING = "scraping"
-    EXECUTING = "executing"
+    RUNNING = "running"
     WAITING = "waiting"
     ERROR = "error"
     STOPPED = "stopped"
@@ -45,277 +40,220 @@ class AgentStats:
     messages_sent: int = 0
     messages_failed: int = 0
     leads_processed: int = 0
+    tool_calls_made: int = 0
+    turns_used: int = 0
     session_start: float = 0.0
 
 
 class AgentEngine:
-    """Main agent loop that coordinates LLM decisions with browser actions.
+    """Prompt-driven agent that controls a browser via LLM tool-calling.
+
+    The user provides a natural-language task prompt. The LLM (via OpenRouter
+    or Ollama) decides what browser actions to take by calling tools. The
+    engine executes those tools and feeds results back until the LLM completes
+    the task or hits the turn limit.
 
     Lifecycle:
-        1. start() is called with a campaign dict and list of leads
-        2. Browser launches, logs in if needed
-        3. For each lead:
-           a. (Dynamic mode) Scrape social profile for context
-           b. Generate message via LLM or template
-           c. Send via browser automation
-           d. Log activity and outreach result
-           e. Wait a human-like delay
-        4. stop() can be called externally to halt after current lead
+        1. start() is called with a task dict
+        2. Browser launches (visible to user)
+        3. LLM receives system prompt + task + tools
+        4. Tool-calling loop runs until completion
+        5. stop() can be called externally to halt
     """
 
     def __init__(
         self,
-        llm: OllamaClient,
+        llm: LLMClient,
         browser: BrowserSession,
         store: DataStore,
+        cormass_api: Any | None = None,
     ) -> None:
         self.llm = llm
         self.browser = browser
         self.store = store
+        self.cormass_api = cormass_api
         self.state = AgentState.IDLE
         self.stats = AgentStats()
         self._stop_requested = False
-        self._campaign: dict[str, Any] | None = None
+        self._task: dict[str, Any] | None = None
         self._session_id: int | None = None
+        self._on_chunk: Callable[[StreamChunk], Awaitable[None]] | None = None
 
-    async def start(self, campaign: dict[str, Any], leads: list[dict[str, Any]]) -> AgentStats:
-        """Run the agent loop over a list of leads using the given campaign.
+    async def start(
+        self,
+        campaign: dict[str, Any],
+        leads: list[dict[str, Any]] | None = None,
+        on_chunk: Callable[[StreamChunk], Awaitable[None]] | None = None,
+    ) -> AgentStats:
+        """Run the agent with a task definition.
 
         Args:
-            campaign: Campaign configuration dict from the database
-            leads: List of lead dicts to process
+            campaign: Task/campaign dict from the database (has user_prompt, etc.)
+            leads: Optional list of leads (for backward compat / pre-loaded leads)
+            on_chunk: Async callback for real-time streaming to UI
 
         Returns:
             AgentStats with final counts
         """
-        self._campaign = campaign
+        self._task = campaign
+        self._on_chunk = on_chunk
         self.state = AgentState.STARTING
         self.stats = AgentStats()
         self.stats.session_start = time.time()
         self._stop_requested = False
 
-        campaign_id = campaign.get("id")
-        platform = campaign.get("platform", "instagram")
-        mode = campaign.get("mode", "dynamic")
-        delay_min = campaign.get("delay_min", 45)
-        delay_max = campaign.get("delay_max", 180)
-        daily_limit = campaign.get("daily_limit", 50)
-        session_limit = campaign.get("session_limit", 15)
+        task_id = campaign.get("id")
+        user_prompt = campaign.get("user_prompt", "").strip()
+
+        if not user_prompt:
+            self._log("error", "No task prompt provided. Cannot start agent.")
+            self.state = AgentState.ERROR
+            return self._finalize("error")
 
         # Start a DB session
         self._session_id = self.store.start_session()
-        self._log("info", f"Agent starting -- {len(leads)} leads, platform={platform}, mode={mode}")
-        self._log("debug", f"Campaign config: delay={delay_min}-{delay_max}s, daily_limit={daily_limit}, session_limit={session_limit}")
-        self._log("debug", f"Browser headless={self.browser.headless}, slow_mo={self.browser.slow_mo}")
+        self._log("info", f"Agent starting -- task: {campaign.get('name', 'Unnamed')}")
 
         try:
             # Launch browser
-            self._log("debug", "Launching Playwright browser...")
-            await self.browser.launch(platform=platform)
-            self._log("debug", "Browser launched successfully, getting platform session...")
-            platform_session = self.browser.get_platform_session(platform)
-            self._log("debug", f"Platform session created: {type(platform_session).__name__}")
+            self._log("info", "Launching browser...")
+            page = await self.browser.launch(platform="general")
+            self._log("info", "Browser ready")
 
-            # Login if needed
-            self.state = AgentState.LOGGING_IN
-            self._log("debug", "Checking if already logged in...")
-            logged_in = await platform_session.is_logged_in()
-            self._log("debug", f"Login check result: logged_in={logged_in}")
+            # Build tool registry
+            tools = build_tool_registry(
+                page=page,
+                cormass_api=self.cormass_api,
+                store=self.store,
+                task_id=task_id,
+            )
+            self._log("info", f"Loaded {len(tools)} tools for the agent")
 
-            if not logged_in:
-                username = campaign.get("sender_username", "")
-                password = campaign.get("sender_password", "")
+            # Build system prompt
+            from openreach.llm.prompts import build_agent_system_prompt
+            system_prompt = build_agent_system_prompt(campaign, leads)
 
-                if not username or not password:
-                    self._log("error", "No sender credentials configured. Cannot log in.")
-                    self._log("debug", f"sender_username present: {bool(username)}, sender_password present: {bool(password)}")
-                    self.state = AgentState.ERROR
-                    return self._finalize("error")
+            # Build user message (the task)
+            user_message = self._build_user_message(campaign, leads)
 
-                self._log("info", f"Logging in as @{username}...")
-                self._log("debug", f"Calling platform_session.login() for @{username}")
-                success = await platform_session.login(username, password)
-                self._log("debug", f"Login returned: success={success}")
-                if not success:
-                    self._log("error", f"Login failed for @{username}")
-                    self.state = AgentState.ERROR
-                    return self._finalize("error")
+            # Run the LLM tool-calling loop
+            self.state = AgentState.RUNNING
 
-                self._log("success", f"Logged in as @{username}")
-                self._log("debug", "Saving browser state after successful login...")
-                await self.browser.save_state(platform)
-            else:
-                self._log("info", "Already logged in (using saved session)")
+            async def _on_chunk_wrapper(chunk: StreamChunk) -> None:
+                """Forward chunks to UI callback and log to DB."""
+                # Forward to UI
+                if self._on_chunk:
+                    await self._on_chunk(chunk)
 
-            # Build system prompt for dynamic mode
-            system_prompt = build_system_prompt(campaign) if mode == "dynamic" else ""
+                # Track stats
+                if chunk.type == ChunkType.TOOL_CALL:
+                    self.stats.tool_calls_made += 1
+                if chunk.type == ChunkType.DONE:
+                    self.stats.turns_used = chunk.turn_number
 
-            # Process leads
-            for i, lead in enumerate(leads):
+                # Check stop
                 if self._stop_requested:
-                    self._log("info", "Stop requested -- halting after current lead")
-                    break
+                    raise asyncio.CancelledError("Stop requested")
 
-                if self.stats.messages_sent >= session_limit:
-                    self._log("info", f"Session limit reached ({session_limit})")
-                    break
+            try:
+                turns = await self.llm.run_agent(
+                    system_prompt=system_prompt,
+                    user_message=user_message,
+                    tools=tools,
+                    on_chunk=_on_chunk_wrapper,
+                )
+            except asyncio.CancelledError:
+                self._log("info", "Agent stopped by user request")
+                turns = []
 
-                today_count = self.store.get_today_message_count()
-                if today_count >= daily_limit:
-                    self._log("info", f"Daily limit reached ({daily_limit})")
-                    break
-
-                lead_name = lead.get("name", "Unknown")
-                handle = lead.get("instagram_handle", "")
-
-                if not handle and platform == "instagram":
-                    self._log("warning", f"No Instagram handle for '{lead_name}' -- skipping")
-                    self.stats.leads_processed += 1
-                    continue
-
-                self._log("info", f"Processing lead {i + 1}/{len(leads)}: {lead_name} (@{handle})")
-
+            # Record turns to DB
+            for turn in turns:
                 try:
-                    # Generate message
-                    if mode == "static":
-                        message = self._generate_static(lead, campaign)
-                    else:
-                        message = await self._generate_dynamic(
-                            lead, campaign, system_prompt, platform_session
-                        )
+                    self.store.log_agent_turn(
+                        campaign_id=task_id,
+                        session_id=self._session_id,
+                        turn_number=turn.turn_number,
+                        role=turn.role,
+                        content=turn.content,
+                        tool_name=turn.tool_name,
+                        tool_args=turn.tool_args,
+                        tool_result=turn.tool_result,
+                        tokens_used=turn.tokens_used,
+                    )
+                except Exception:
+                    pass
 
-                    if not message:
-                        self._log("warning", f"Empty message for '{lead_name}' -- skipping")
-                        self.stats.leads_processed += 1
-                        continue
-
-                    # Execute outreach
-                    self.state = AgentState.EXECUTING
-                    self._log("info", f"Sending message to @{handle} ({len(message)} chars)...")
-
-                    success = await platform_session.send_dm(handle, message)
-
-                    if success:
-                        self.stats.messages_sent += 1
-                        self.store.record_outreach(lead, "sent", message, campaign_id=campaign_id)
-                        self._log("success", f"Message sent to @{handle}")
-                        await self.browser.save_state(platform)
-                    else:
-                        self.stats.messages_failed += 1
-                        self.store.record_outreach(lead, "failed", message, campaign_id=campaign_id)
-                        self._log("error", f"Failed to send message to @{handle}")
-
-                    # Human-like delay
-                    self.state = AgentState.WAITING
-                    delay = random.randint(delay_min, delay_max)
-                    self._log("info", f"Waiting {delay}s before next message...")
-                    await asyncio.sleep(delay)
-
-                except Exception as e:
-                    self.state = AgentState.ERROR
-                    tb = traceback.format_exc()
-                    logger.error("Error processing lead %s: %s\n%s", lead_name, e, tb)
-                    self.stats.messages_failed += 1
-                    self.store.record_outreach(lead, "failed", error=str(e), campaign_id=campaign_id)
-                    self._log("error", f"Error processing '{lead_name}': {e}")
-                    self._log("debug", f"Traceback for '{lead_name}':\n{tb}")
-
-                self.stats.leads_processed += 1
+            self.stats.turns_used = len(turns)
+            self._log("info", f"Agent completed: {self.stats.turns_used} turns, {self.stats.tool_calls_made} tool calls")
 
         except Exception as e:
             tb = traceback.format_exc()
             logger.error("Fatal agent error: %s\n%s", e, tb)
             self._log("error", f"Fatal error: {e}")
-            self._log("debug", f"Fatal traceback:\n{tb}")
             self.state = AgentState.ERROR
 
         finally:
-            # Clean up browser
             try:
-                await self.browser.close(platform)
+                await self.browser.close("general")
             except Exception:
                 pass
 
         return self._finalize("completed" if not self._stop_requested else "stopped")
 
     def stop(self) -> None:
-        """Request the agent to stop after the current lead."""
+        """Request the agent to stop after the current tool call."""
         self._stop_requested = True
         self._log("info", "Stop requested...")
 
     # ------------------------------------------------------------------
-    # Message generation
+    # Message builders
     # ------------------------------------------------------------------
 
-    def _generate_static(self, lead: dict[str, Any], campaign: dict[str, Any]) -> str | None:
-        """Generate a message using static template substitution."""
-        template = campaign.get("message_template", "")
-        if not template:
-            self._log("warning", "No message template configured for static mode")
-            return None
+    def _build_user_message(self, campaign: dict[str, Any], leads: list[dict[str, Any]] | None) -> str:
+        """Build the user message for the LLM from the task prompt and lead context."""
+        parts: list[str] = []
 
-        message = build_static_message(template, lead)
-        if not message.strip():
-            return None
+        user_prompt = campaign.get("user_prompt", "")
+        parts.append(f"## Task\n{user_prompt}")
 
-        self._log("info", f"Static message generated ({len(message)} chars)")
-        return message
+        additional = campaign.get("additional_notes", "").strip()
+        if additional:
+            parts.append(f"\n## Additional Context\n{additional}")
 
-    async def _generate_dynamic(
-        self,
-        lead: dict[str, Any],
-        campaign: dict[str, Any],
-        system_prompt: str,
-        platform_session: Any,
-    ) -> str | None:
-        """Generate a message using the LLM with optional scraped profile context."""
-        scraped_profile = None
+        # Lead data summary
+        if leads:
+            parts.append(f"\n## Leads ({len(leads)} total)")
+            for i, lead in enumerate(leads[:20]):
+                name = lead.get("name", "Unknown")
+                btype = lead.get("business_type", "")
+                loc = lead.get("location", "")
+                handle = lead.get("instagram_handle", "")
+                phone = lead.get("phone_number", "")
+                email = lead.get("email", "")
+                website = lead.get("website", "")
 
-        # Try to get cached profile first
-        lead_id = lead.get("id")
-        if lead_id:
-            scraped_profile = self.store.get_lead_cached_profile(lead_id)
+                line = f"{i+1}. **{name}**"
+                if btype:
+                    line += f" ({btype})"
+                if loc:
+                    line += f" - {loc[:50]}"
+                details = []
+                if handle:
+                    details.append(f"IG: @{handle}")
+                if phone:
+                    details.append(f"Tel: {phone}")
+                if email:
+                    details.append(f"Email: {email}")
+                if website:
+                    details.append(f"Web: {website}")
+                if details:
+                    line += " | " + ", ".join(details)
+                parts.append(line)
 
-        # Scrape fresh if needed
-        if scraped_profile is None:
-            handle = lead.get("instagram_handle", "")
-            if handle:
-                self.state = AgentState.SCRAPING
-                self._log("info", f"Scraping profile @{handle} for context...")
-                try:
-                    scraped_profile = await platform_session.scrape_profile(handle)
-                    if scraped_profile and lead_id:
-                        self.store.update_lead_profile(lead_id, scraped_profile)
-                        self._log("info", f"Profile scraped: {len(scraped_profile)} data points")
-                except Exception as e:
-                    self._log("warning", f"Profile scrape failed: {e}")
+            if len(leads) > 20:
+                parts.append(f"... and {len(leads) - 20} more leads (use leads_get_canvas to view all)")
 
-        # Build prompt
-        self.state = AgentState.PLANNING
-        user_prompt = build_dynamic_prompt(lead, scraped_profile)
-
-        self._log("info", "Generating message with LLM...")
-        try:
-            response = await self.llm.generate(user_prompt, system=system_prompt)
-        except Exception as e:
-            self._log("error", f"LLM generation failed: {e}")
-            return None
-
-        if not response or not response.strip():
-            return None
-
-        # Clean response -- remove any thinking tags qwen might add
-        message = response.strip()
-        # Remove <think>...</think> blocks
-        import re
-        message = re.sub(r"<think>.*?</think>", "", message, flags=re.DOTALL).strip()
-        # Remove surrounding quotes if present
-        if (message.startswith('"') and message.endswith('"')) or \
-           (message.startswith("'") and message.endswith("'")):
-            message = message[1:-1].strip()
-
-        self._log("info", f"LLM message generated ({len(message)} chars)")
-        return message
+        return "\n".join(parts)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -330,25 +268,24 @@ class AgentEngine:
             self.store.log_activity(
                 message=message,
                 level=level,
-                campaign_id=self._campaign.get("id") if self._campaign else None,
+                campaign_id=self._task.get("id") if self._task else None,
                 session_id=self._session_id,
             )
         except Exception:
-            pass  # Don't let logging errors crash the agent
+            pass
 
     def _finalize(self, status: str) -> AgentStats:
         """End the session and return stats."""
         self.state = AgentState.STOPPED
         self._log(
             "info",
-            f"Agent finished -- Sent: {self.stats.messages_sent}, "
-            f"Failed: {self.stats.messages_failed}, "
-            f"Processed: {self.stats.leads_processed}",
+            f"Agent finished -- Turns: {self.stats.turns_used}, "
+            f"Tool calls: {self.stats.tool_calls_made}",
         )
 
         if self._session_id:
             self.store.end_session(self._session_id, {
-                "messages_sent": self.stats.messages_sent,
+                "messages_sent": self.stats.tool_calls_made,
                 "messages_failed": self.stats.messages_failed,
                 "leads_processed": self.stats.leads_processed,
                 "status": status,

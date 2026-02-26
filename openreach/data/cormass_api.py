@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -113,11 +114,15 @@ class CormassApiClient:
             lead = {
                 "name": str(merged.get("name") or "").strip(),
                 "instagram_handle": _extract_instagram(merged, enrichment),
+                "phone_number": str(merged.get("phone_number") or merged.get("phone") or "").strip(),
+                "email": str(merged.get("email") or "").strip(),
+                "social_handles": json.dumps(_extract_all_socials(merged, enrichment)),
                 "business_type": business_type.strip(),
                 "location": str(merged.get("full_address") or merged.get("address") or "").strip(),
                 "rating": _safe_float(merged.get("rating")),
                 "review_count": _safe_int(merged.get("review_count")),
                 "website": str(merged.get("website") or "").strip(),
+                "enrichment_json": json.dumps(enrichment) if enrichment else None,
                 "notes": "",
                 "cormass_business_id": str(merged.get("business_id") or merged.get("place_id") or "").strip(),
                 "cormass_canvas_id": canvas_id,
@@ -251,3 +256,36 @@ def _extract_instagram(item: dict[str, Any], enrichment: dict[str, Any] | None =
             return ig.lstrip("@")
 
     return ""
+
+
+def _extract_all_socials(item: dict[str, Any], enrichment: dict[str, Any] | None = None) -> dict[str, str]:
+    """Extract all social media handles from a lead item and enrichment data."""
+    socials: dict[str, str] = {}
+
+    # Instagram
+    ig = _extract_instagram(item, enrichment)
+    if ig:
+        socials["instagram"] = ig
+
+    # From enrichment socials
+    if enrichment and isinstance(enrichment, dict):
+        enrichment_socials = enrichment.get("socials") or {}
+        if isinstance(enrichment_socials, dict):
+            for platform in ("facebook", "twitter", "linkedin", "youtube", "tiktok", "pinterest"):
+                val = enrichment_socials.get(platform, "")
+                if val:
+                    # Extract handle from URL if needed
+                    val = val.rstrip("/").split("/")[-1]
+                    if val:
+                        socials[platform] = val
+
+    # From social links in merged data
+    social_links = item.get("socialLinks") or item.get("social_links") or {}
+    if isinstance(social_links, dict):
+        for platform, url in social_links.items():
+            if url and platform not in socials:
+                handle = url.rstrip("/").split("/")[-1]
+                if handle:
+                    socials[platform] = handle
+
+    return socials

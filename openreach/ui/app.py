@@ -220,7 +220,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
         <div class="tabs">
             <button class="tab active" onclick="switchTab('dashboard')">Dashboard</button>
-            <button class="tab" onclick="switchTab('campaign')">Campaign</button>
+            <button class="tab" onclick="switchTab('task')">Task</button>
             <button class="tab" onclick="switchTab('import')">Import Leads</button>
             <button class="tab" onclick="switchTab('settings')">Settings</button>
         </div>
@@ -246,28 +246,30 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                     <div class="value green" id="stat-sent">--</div>
                 </div>
                 <div class="stat-card">
-                    <div class="label">Replies</div>
-                    <div class="value blue" id="stat-replied">--</div>
+                    <div class="label">Tool Calls</div>
+                    <div class="value blue" id="stat-tools">--</div>
                 </div>
                 <div class="stat-card">
-                    <div class="label">Today</div>
-                    <div class="value yellow" id="stat-today">--</div>
+                    <div class="label">Turns Used</div>
+                    <div class="value yellow" id="stat-turns">--</div>
                 </div>
                 <div class="stat-card">
                     <div class="label">Failed</div>
                     <div class="value red" id="stat-failed">--</div>
                 </div>
                 <div class="stat-card">
-                    <div class="label">Reply Rate</div>
-                    <div class="value" id="stat-rate">--%</div>
+                    <div class="label">Today</div>
+                    <div class="value" id="stat-today">--</div>
                 </div>
             </div>
 
-            <!-- Activity Log -->
+            <!-- Agent Stream -->
             <div class="section">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
-                    <h2 style="margin: 0;">Activity Log</h2>
-                    <button class="btn btn-secondary" onclick="clearActivityView()" style="font-size: 0.75rem; padding: 0.25rem 0.625rem;">Clear</button>
+                    <h2 style="margin: 0;">Agent Stream</h2>
+                    <div style="display: flex; gap: 0.5rem;">
+                        <button class="btn btn-secondary" onclick="clearActivityView()" style="font-size: 0.75rem; padding: 0.25rem 0.625rem;">Clear</button>
+                    </div>
                 </div>
                 <div class="activity-log" id="activity-log">
                     <div class="activity-entry level-info"><span class="time">--:--:--</span>Waiting for agent to start...</div>
@@ -280,9 +282,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                     <thead>
                         <tr>
                             <th>Name</th>
-                            <th>Handle</th>
                             <th>Type</th>
                             <th>Location</th>
+                            <th>Contact</th>
                             <th>Rating</th>
                             <th>Source</th>
                         </tr>
@@ -294,85 +296,86 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             </div>
         </div>
 
-        <!-- CAMPAIGN TAB -->
-        <div class="tab-content" id="tab-campaign">
+        <!-- TASK TAB -->
+        <div class="tab-content" id="tab-task">
             <div class="section">
-                <h2>Campaign Configuration</h2>
+                <h2>Task Configuration</h2>
                 <p style="color: #737373; font-size: 0.875rem; margin-bottom: 1.25rem;">
-                    Configure your outreach campaign. Set the platform, mode, message prompt, and sender credentials.
-                    The agent will use this configuration when processing leads.
+                    Define what the AI agent should do. Write a natural-language task prompt and the
+                    agent will use browser tools to execute it autonomously.
                 </p>
 
                 <div class="form-group">
-                    <label for="camp-name">Campaign Name</label>
-                    <input type="text" class="form-input" id="camp-name" placeholder="My Outreach Campaign">
+                    <label for="task-name">Task Name</label>
+                    <input type="text" class="form-input" id="task-name" placeholder="My Outreach Task">
                 </div>
 
+                <div class="form-group">
+                    <label for="task-template-select">Quick Start Template</label>
+                    <select class="form-select" id="task-template-select" onchange="applyTemplate()">
+                        <option value="">-- Custom (blank) --</option>
+                        <option value="instagram_dm">Instagram DM Outreach</option>
+                        <option value="email_outreach">Email Outreach</option>
+                        <option value="research">Business Research</option>
+                        <option value="social_engagement">Social Media Engagement</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="task-prompt">Task Prompt (natural language instructions for the AI)</label>
+                    <textarea class="form-textarea" id="task-prompt" rows="8"
+                        placeholder="Example: Go to Instagram and send a personalized DM to each lead on my list. Mention their business type and location. Be friendly and professional. Offer a free consultation for our cleaning services."></textarea>
+                    <div style="font-size: 0.7rem; color: #525252; margin-top: 0.375rem;">
+                        This is the core instruction. The AI agent will read this and autonomously decide
+                        which browser actions to take (navigate, click, type, etc.) to fulfill the task.
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="task-notes">Additional Context (extra info for the AI)</label>
+                    <textarea class="form-textarea" id="task-notes" rows="3"
+                        placeholder="Our company is... We offer... Never mention pricing... Use a casual tone..."></textarea>
+                    <div style="font-size: 0.7rem; color: #525252; margin-top: 0.375rem;">
+                        Additional context: your company info, USPs, tone preferences, things to avoid, credentials, etc.
+                    </div>
+                </div>
+
+                <div class="divider"></div>
+
+                <h3 style="font-size: 1rem; margin-bottom: 1rem;">LLM Configuration</h3>
                 <div class="form-cols">
                     <div class="form-group">
-                        <label>Platform</label>
-                        <select class="form-select" id="camp-platform" onchange="onPlatformChange()">
-                            <option value="instagram">Instagram</option>
-                            <option value="linkedin" disabled>LinkedIn (coming soon)</option>
-                            <option value="twitter" disabled>Twitter / X (coming soon)</option>
-                            <option value="email" disabled>Email (coming soon)</option>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label>Outreach Mode</label>
+                        <label>Provider</label>
                         <div class="mode-toggle">
-                            <button id="mode-dynamic" class="active" onclick="setMode('dynamic')">Dynamic (AI)</button>
-                            <button id="mode-static" onclick="setMode('static')">Static (Template)</button>
+                            <button id="provider-openrouter" class="active" onclick="setProvider('openrouter')">OpenRouter (Cloud)</button>
+                            <button id="provider-ollama" onclick="setProvider('ollama')">Ollama (Local)</button>
                         </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="task-model">Model</label>
+                        <input type="text" class="form-input" id="task-model" value="qwen/qwen3-235b-a22b"
+                               placeholder="e.g. qwen/qwen3-235b-a22b">
+                    </div>
+                </div>
+                <div class="form-group" id="openrouter-key-group">
+                    <label for="task-openrouter-key">OpenRouter API Key</label>
+                    <input type="password" class="form-input" id="task-openrouter-key"
+                           placeholder="sk-or-v1-xxxxxxxxxxxxxxxx">
+                    <div style="font-size: 0.7rem; color: #525252; margin-top: 0.375rem;">
+                        Get your key at <a href="https://openrouter.ai/keys" target="_blank" style="color: #7c3aed;">openrouter.ai/keys</a>.
+                        This overrides the global key in Settings for this task only.
                     </div>
                 </div>
 
                 <div class="divider"></div>
 
-                <!-- Dynamic mode fields -->
-                <div id="dynamic-fields">
-                    <div class="form-group">
-                        <label for="camp-prompt">AI Prompt (defines the AI's role and behavior)</label>
-                        <textarea class="form-textarea" id="camp-prompt" rows="4"
-                            placeholder="You are a sales outreach assistant for [Your Company]. You help connect with businesses that need [your service]. Be friendly, concise, and reference something specific about their business."></textarea>
-                        <div style="font-size: 0.7rem; color: #525252; margin-top: 0.375rem;">
-                            This becomes the AI's system instructions. Tell it who you are, what you offer, and how to approach leads.
-                        </div>
-                    </div>
-
-                    <div class="form-group">
-                        <label for="camp-notes">Additional Notes (extra context for the AI)</label>
-                        <textarea class="form-textarea" id="camp-notes" rows="3"
-                            placeholder="Our main USP is... We target businesses that... Never mention pricing..."></textarea>
-                        <div style="font-size: 0.7rem; color: #525252; margin-top: 0.375rem;">
-                            Additional information the AI should know. Pricing details, USPs, tone preferences, things to avoid, etc.
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Static mode fields -->
-                <div id="static-fields" style="display: none;">
-                    <div class="form-group">
-                        <label for="camp-template">Message Template</label>
-                        <textarea class="form-textarea" id="camp-template" rows="5"
-                            placeholder="Hi {{name}}! I noticed your {{business_type}} business in {{location}}. We help businesses like yours with [service]. Would you be open to a quick chat?"></textarea>
-                        <div style="font-size: 0.7rem; color: #525252; margin-top: 0.375rem;">
-                            Use {{name}}, {{business_type}}, {{location}}, {{rating}}, {{website}}, {{instagram_handle}}, {{notes}}, {{pain_points}} as placeholders.
-                        </div>
-                    </div>
-                </div>
-
-                <div class="divider"></div>
-
-                <h3 style="font-size: 1rem; margin-bottom: 1rem;">Sender Account</h3>
-                <div class="form-cols">
-                    <div class="form-group">
-                        <label for="camp-username">Username</label>
-                        <input type="text" class="form-input" id="camp-username" placeholder="your_instagram_handle">
-                    </div>
-                    <div class="form-group">
-                        <label for="camp-password">Password</label>
-                        <input type="password" class="form-input" id="camp-password" placeholder="Account password">
+                <h3 style="font-size: 1rem; margin-bottom: 1rem;">Context Canvases (Lead Source)</h3>
+                <div class="form-group">
+                    <label for="task-canvas-ids">Canvas IDs (comma-separated)</label>
+                    <input type="text" class="form-input" id="task-canvas-ids"
+                           placeholder="e.g. 42, 87 -- leave blank to use all imported leads">
+                    <div style="font-size: 0.7rem; color: #525252; margin-top: 0.375rem;">
+                        Specify which Cormass Leads canvases to use. The agent will have access to leads from these canvases.
                     </div>
                 </div>
 
@@ -381,50 +384,40 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 <h3 style="font-size: 1rem; margin-bottom: 1rem;">Limits</h3>
                 <div class="form-cols">
                     <div class="form-group">
-                        <label for="camp-daily">Daily Limit</label>
-                        <input type="number" class="form-input" id="camp-daily" value="50" min="1" max="500">
+                        <label for="task-daily">Daily Limit</label>
+                        <input type="number" class="form-input" id="task-daily" value="50" min="1" max="500">
                     </div>
                     <div class="form-group">
-                        <label for="camp-session">Per Session Limit</label>
-                        <input type="number" class="form-input" id="camp-session" value="15" min="1" max="100">
+                        <label for="task-session">Per Session Limit</label>
+                        <input type="number" class="form-input" id="task-session" value="15" min="1" max="100">
                     </div>
                 </div>
                 <div class="form-cols">
                     <div class="form-group">
-                        <label for="camp-delay-min">Min Delay (seconds)</label>
-                        <input type="number" class="form-input" id="camp-delay-min" value="45" min="10" max="600">
+                        <label for="task-delay-min">Min Delay (seconds)</label>
+                        <input type="number" class="form-input" id="task-delay-min" value="45" min="10" max="600">
                     </div>
                     <div class="form-group">
-                        <label for="camp-delay-max">Max Delay (seconds)</label>
-                        <input type="number" class="form-input" id="camp-delay-max" value="180" min="20" max="900">
+                        <label for="task-delay-max">Max Delay (seconds)</label>
+                        <input type="number" class="form-input" id="task-delay-max" value="180" min="20" max="900">
                     </div>
                 </div>
 
                 <div class="divider"></div>
 
                 <div style="display: flex; gap: 0.75rem; flex-wrap: wrap;">
-                    <button class="btn btn-primary" onclick="saveCampaign()" id="btn-save-campaign">Save Campaign</button>
-                    <button class="btn btn-secondary" onclick="previewMessage()" id="btn-preview">Preview Message</button>
-                    <button class="btn btn-secondary" onclick="dryRun()" id="btn-dry-run">Dry Run (1 Lead)</button>
+                    <button class="btn btn-primary" onclick="saveTask()" id="btn-save-task">Save Task</button>
+                    <button class="btn btn-secondary" onclick="newTask()">New Task</button>
                 </div>
 
-                <div id="campaign-status" style="margin-top: 0.75rem; font-size: 0.8125rem;"></div>
-
-                <!-- Message Preview -->
-                <div id="preview-result" style="display: none; margin-top: 1rem;">
-                    <div class="section" style="background: #0f0f0f;">
-                        <h3 style="font-size: 0.875rem; margin-bottom: 0.5rem;">Message Preview</h3>
-                        <div id="preview-text" style="font-size: 0.875rem; white-space: pre-wrap; line-height: 1.5;"></div>
-                        <div id="preview-meta" style="font-size: 0.75rem; color: #525252; margin-top: 0.5rem;"></div>
-                    </div>
-                </div>
+                <div id="task-status" style="margin-top: 0.75rem; font-size: 0.8125rem;"></div>
             </div>
 
-            <!-- Saved Campaigns -->
+            <!-- Saved Tasks -->
             <div class="section">
-                <h2>Saved Campaigns</h2>
-                <div id="campaigns-list" style="margin-top: 0.75rem;">
-                    <div style="color: #525252; font-size: 0.875rem;">Loading campaigns...</div>
+                <h2>Saved Tasks</h2>
+                <div id="tasks-list" style="margin-top: 0.75rem;">
+                    <div style="color: #525252; font-size: 0.875rem;">Loading tasks...</div>
                 </div>
             </div>
         </div>
@@ -480,6 +473,44 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
         <!-- SETTINGS TAB -->
         <div class="tab-content" id="tab-settings">
+            <div class="section">
+                <h2>OpenRouter API (LLM)</h2>
+                <p style="color: #737373; font-size: 0.875rem; margin-bottom: 1.25rem;">
+                    Configure the default OpenRouter API key for AI agent tasks.
+                    Get a key at <a href="https://openrouter.ai/keys" target="_blank" style="color: #7c3aed;">openrouter.ai/keys</a>.
+                </p>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="openrouter-key-input">OpenRouter API Key</label>
+                        <input type="password" class="form-input" id="openrouter-key-input"
+                               placeholder="sk-or-v1-xxxxxxxxxxxxxxxx">
+                    </div>
+                    <div style="padding-bottom: 0;">
+                        <button class="btn btn-primary" onclick="saveOpenRouterKey()" id="btn-save-or-key">Save</button>
+                    </div>
+                    <div style="padding-bottom: 0;">
+                        <button class="btn btn-secondary" onclick="testLLMConnection()" id="btn-test-llm">Test</button>
+                    </div>
+                </div>
+                <div id="openrouter-key-status" style="margin-top: 0.75rem; font-size: 0.8125rem;"></div>
+
+                <div class="form-cols" style="margin-top: 1rem;">
+                    <div class="form-group">
+                        <label for="default-model-input">Default Model</label>
+                        <input type="text" class="form-input" id="default-model-input"
+                               value="qwen/qwen3-235b-a22b" placeholder="e.g. qwen/qwen3-235b-a22b">
+                    </div>
+                    <div class="form-group">
+                        <label for="default-provider-input">Default Provider</label>
+                        <select class="form-select" id="default-provider-input">
+                            <option value="openrouter">OpenRouter (Cloud)</option>
+                            <option value="ollama">Ollama (Local)</option>
+                        </select>
+                    </div>
+                </div>
+                <button class="btn btn-secondary" onclick="saveLLMDefaults()" style="margin-top: 0.5rem;">Save LLM Defaults</button>
+            </div>
+
             <div class="section">
                 <h2>Cormass Leads API</h2>
                 <p style="color: #737373; font-size: 0.875rem; margin-bottom: 1.25rem;">
@@ -543,13 +574,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     <script>
         // ---- State ----
-        let currentCampaignId = null;
-        let currentMode = 'dynamic';
+        let currentTaskId = null;
+        let currentProvider = 'openrouter';
         let agentRunning = false;
         let lastActivityId = 0;
         let activityPollTimer = null;
         let statusPollTimer = null;
         let verboseMode = false;
+
+        // ---- Task Templates ----
+        const TASK_TEMPLATES = {
+            instagram_dm: "Go to Instagram and send a personalized direct message to each lead. For each lead:\\n1. Navigate to their Instagram profile\\n2. Click the Message button\\n3. Write a short, friendly message referencing their business type and location\\n4. Send the message and log it\\n\\nBe human-like: wait a few seconds between actions, do not rush.",
+            email_outreach: "For each lead that has an email address:\\n1. Navigate to Gmail (or the email service I am logged into)\\n2. Compose a new email to the lead's email address\\n3. Write a professional but friendly email offering our services\\n4. Send the email and log it",
+            research: "Research each lead's online presence:\\n1. Search for their business on Google\\n2. Visit their website if available\\n3. Check their social media profiles\\n4. Report a summary of findings using report_progress",
+            social_engagement: "Visit each lead's social media profiles and engage naturally:\\n1. Find their Instagram or Facebook page\\n2. Like 1-2 recent posts\\n3. Leave a genuine, relevant comment on one post\\n4. Report what you did"
+        };
 
         // ---- Tab switching ----
         function switchTab(tabId) {
@@ -560,7 +599,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
             if (tabId === 'import') { checkImportReady(); }
             if (tabId === 'settings') { loadSettings(); }
-            if (tabId === 'campaign') { loadCampaigns(); }
+            if (tabId === 'task') { loadTasks(); }
         }
 
         // ---- Toast notifications ----
@@ -578,10 +617,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 const data = await res.json();
                 document.getElementById('stat-leads').textContent = data.total_leads;
                 document.getElementById('stat-sent').textContent = data.total_sent;
-                document.getElementById('stat-replied').textContent = data.total_replied;
-                document.getElementById('stat-today').textContent = data.today_sent;
+                document.getElementById('stat-tools').textContent = data.tool_calls || 0;
+                document.getElementById('stat-turns').textContent = data.turns_used || 0;
                 document.getElementById('stat-failed').textContent = data.total_failed;
-                document.getElementById('stat-rate').textContent = data.reply_rate + '%';
+                document.getElementById('stat-today').textContent = data.today_sent;
             } catch (e) { console.error('Failed to load stats', e); }
         }
 
@@ -594,16 +633,22 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                     tbody.innerHTML = '<tr><td colspan="6" style="color:#525252">No leads imported yet. Go to Import Leads tab to get started.</td></tr>';
                     return;
                 }
-                tbody.innerHTML = leads.map(l => `
+                tbody.innerHTML = leads.map(l => {
+                    let contact = '';
+                    if (l.instagram_handle) contact += '@' + esc(l.instagram_handle);
+                    if (l.email) contact += (contact ? ', ' : '') + esc(l.email);
+                    if (l.phone_number) contact += (contact ? ', ' : '') + esc(l.phone_number);
+                    if (!contact) contact = '-';
+                    return `
                     <tr>
                         <td>${esc(l.name) || '-'}</td>
-                        <td>${l.instagram_handle ? '@' + esc(l.instagram_handle) : '-'}</td>
                         <td>${esc(l.business_type) || '-'}</td>
                         <td>${esc(l.location) || '-'}</td>
+                        <td style="max-width: 200px; overflow: hidden; text-overflow: ellipsis;">${contact}</td>
                         <td>${l.rating != null ? l.rating.toFixed(1) : '-'}</td>
                         <td>${esc(l.source) || '-'}</td>
-                    </tr>
-                `).join('');
+                    </tr>`;
+                }).join('');
             } catch (e) { console.error('Failed to load leads', e); }
         }
 
@@ -642,11 +687,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             const btnStop = document.getElementById('btn-stop');
             const statusHeader = document.getElementById('agent-status');
 
-            if (state === 'running' || state === 'planning' || state === 'executing' ||
-                state === 'scraping' || state === 'waiting' || state === 'logging_in' || state === 'starting') {
+            if (state === 'running' || state === 'starting' || state === 'waiting') {
                 pulse.className = 'pulse running';
-                const labels = { running: 'Running', planning: 'Planning Message', executing: 'Sending Message',
-                                 scraping: 'Scraping Profile', waiting: 'Waiting', logging_in: 'Logging In', starting: 'Starting' };
+                const labels = { running: 'Running', starting: 'Starting', waiting: 'Waiting for LLM' };
                 text.textContent = 'Agent: ' + (labels[state] || 'Running');
                 btnStart.style.display = 'none';
                 btnStop.style.display = '';
@@ -727,9 +770,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 updateAgentUI(data.state);
                 const detail = document.getElementById('agent-detail');
                 if (data.stats) {
-                    detail.textContent = 'Sent: ' + data.stats.messages_sent +
-                        ' | Failed: ' + data.stats.messages_failed +
-                        ' | Processed: ' + data.stats.leads_processed;
+                    detail.textContent = 'Tools: ' + (data.stats.tool_calls_made || 0) +
+                        ' | Turns: ' + (data.stats.turns_used || 0) +
+                        ' | Sent: ' + (data.stats.messages_sent || 0);
                 }
                 if (data.state === 'idle' || data.state === 'stopped' || data.state === 'error') {
                     loadStats(); // refresh dashboard stats after run
@@ -737,65 +780,82 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             } catch (e) { console.error('Status poll error', e); }
         }
 
-        // ---- Campaign Tab ----
-        function setMode(mode) {
-            currentMode = mode;
-            document.getElementById('mode-dynamic').classList.toggle('active', mode === 'dynamic');
-            document.getElementById('mode-static').classList.toggle('active', mode === 'static');
-            document.getElementById('dynamic-fields').style.display = mode === 'dynamic' ? '' : 'none';
-            document.getElementById('static-fields').style.display = mode === 'static' ? '' : 'none';
+        // ---- Task Tab ----
+        function setProvider(provider) {
+            currentProvider = provider;
+            document.getElementById('provider-openrouter').classList.toggle('active', provider === 'openrouter');
+            document.getElementById('provider-ollama').classList.toggle('active', provider === 'ollama');
+            document.getElementById('openrouter-key-group').style.display = provider === 'openrouter' ? '' : 'none';
+            if (provider === 'ollama') {
+                document.getElementById('task-model').value = 'qwen3:4b';
+            } else {
+                document.getElementById('task-model').value = 'qwen/qwen3-235b-a22b';
+            }
         }
 
-        function onPlatformChange() {
-            // Future: update UI based on platform
+        function applyTemplate() {
+            const sel = document.getElementById('task-template-select').value;
+            if (sel && TASK_TEMPLATES[sel]) {
+                document.getElementById('task-prompt').value = TASK_TEMPLATES[sel];
+            }
         }
 
-        function getCampaignFormData() {
+        function getTaskFormData() {
             return {
-                name: document.getElementById('camp-name').value.trim() || 'Default Campaign',
-                platform: document.getElementById('camp-platform').value,
-                mode: currentMode,
-                user_prompt: document.getElementById('camp-prompt').value.trim(),
-                additional_notes: document.getElementById('camp-notes').value.trim(),
-                message_template: document.getElementById('camp-template').value.trim(),
-                sender_username: document.getElementById('camp-username').value.trim(),
-                sender_password: document.getElementById('camp-password').value.trim(),
-                daily_limit: parseInt(document.getElementById('camp-daily').value) || 50,
-                session_limit: parseInt(document.getElementById('camp-session').value) || 15,
-                delay_min: parseInt(document.getElementById('camp-delay-min').value) || 45,
-                delay_max: parseInt(document.getElementById('camp-delay-max').value) || 180,
+                name: document.getElementById('task-name').value.trim() || 'Default Task',
+                platform: 'browser',
+                mode: 'agent',
+                user_prompt: document.getElementById('task-prompt').value.trim(),
+                additional_notes: document.getElementById('task-notes').value.trim(),
+                context_canvas_ids: document.getElementById('task-canvas-ids').value.trim(),
+                llm_provider: currentProvider,
+                llm_model: document.getElementById('task-model').value.trim(),
+                daily_limit: parseInt(document.getElementById('task-daily').value) || 50,
+                session_limit: parseInt(document.getElementById('task-session').value) || 15,
+                delay_min: parseInt(document.getElementById('task-delay-min').value) || 45,
+                delay_max: parseInt(document.getElementById('task-delay-max').value) || 180,
             };
         }
 
-        function loadCampaignIntoForm(c) {
-            currentCampaignId = c.id;
-            document.getElementById('camp-name').value = c.name || '';
-            document.getElementById('camp-platform').value = c.platform || 'instagram';
-            setMode(c.mode || 'dynamic');
-            document.getElementById('camp-prompt').value = c.user_prompt || '';
-            document.getElementById('camp-notes').value = c.additional_notes || '';
-            document.getElementById('camp-template').value = c.message_template || '';
-            document.getElementById('camp-username').value = c.sender_username || '';
-            document.getElementById('camp-password').value = c.sender_password ? '********' : '';
-            document.getElementById('camp-daily').value = c.daily_limit || 50;
-            document.getElementById('camp-session').value = c.session_limit || 15;
-            document.getElementById('camp-delay-min').value = c.delay_min || 45;
-            document.getElementById('camp-delay-max').value = c.delay_max || 180;
+        function loadTaskIntoForm(c) {
+            currentTaskId = c.id;
+            document.getElementById('task-name').value = c.name || '';
+            document.getElementById('task-prompt').value = c.user_prompt || '';
+            document.getElementById('task-notes').value = c.additional_notes || '';
+            document.getElementById('task-canvas-ids').value = c.context_canvas_ids || '';
+            setProvider(c.llm_provider || 'openrouter');
+            document.getElementById('task-model').value = c.llm_model || 'qwen/qwen3-235b-a22b';
+            document.getElementById('task-daily').value = c.daily_limit || 50;
+            document.getElementById('task-session').value = c.session_limit || 15;
+            document.getElementById('task-delay-min').value = c.delay_min || 45;
+            document.getElementById('task-delay-max').value = c.delay_max || 180;
+            // Per-task OpenRouter key is not stored in DB, user enters per session
+            document.getElementById('task-openrouter-key').value = '';
         }
 
-        async function saveCampaign() {
-            const data = getCampaignFormData();
-            // Don't overwrite password if user didn't change it
-            if (data.sender_password === '********') { delete data.sender_password; }
+        function newTask() {
+            currentTaskId = null;
+            document.getElementById('task-name').value = '';
+            document.getElementById('task-prompt').value = '';
+            document.getElementById('task-notes').value = '';
+            document.getElementById('task-canvas-ids').value = '';
+            document.getElementById('task-template-select').value = '';
+            setProvider('openrouter');
+            document.getElementById('task-model').value = 'qwen/qwen3-235b-a22b';
+            document.getElementById('task-openrouter-key').value = '';
+            showToast('Form cleared for new task', 'info');
+        }
 
-            const btn = document.getElementById('btn-save-campaign');
+        async function saveTask() {
+            const data = getTaskFormData();
+            const btn = document.getElementById('btn-save-task');
             btn.disabled = true; btn.textContent = 'Saving...';
 
             try {
                 let url = '/api/campaigns';
                 let method = 'POST';
-                if (currentCampaignId) {
-                    url = '/api/campaigns/' + currentCampaignId;
+                if (currentTaskId) {
+                    url = '/api/campaigns/' + currentTaskId;
                     method = 'PUT';
                 }
                 const res = await fetch(url, {
@@ -807,57 +867,57 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 if (result.error) {
                     showToast(result.error, 'error');
                 } else {
-                    currentCampaignId = result.id;
-                    showToast('Campaign saved', 'success');
-                    loadCampaigns();
+                    currentTaskId = result.id;
+                    showToast('Task saved', 'success');
+                    loadTasks();
                 }
             } catch (e) {
-                showToast('Failed to save campaign', 'error');
+                showToast('Failed to save task', 'error');
             }
-            btn.disabled = false; btn.textContent = 'Save Campaign';
+            btn.disabled = false; btn.textContent = 'Save Task';
         }
 
-        async function loadCampaigns() {
+        async function loadTasks() {
             try {
                 const res = await fetch('/api/campaigns');
-                const campaigns = await res.json();
-                const listEl = document.getElementById('campaigns-list');
-                if (!campaigns.length) {
-                    listEl.innerHTML = '<div style="color: #525252; font-size: 0.875rem;">No campaigns yet. Configure one above and save.</div>';
+                const tasks = await res.json();
+                const listEl = document.getElementById('tasks-list');
+                if (!tasks.length) {
+                    listEl.innerHTML = '<div style="color: #525252; font-size: 0.875rem;">No tasks yet. Configure one above and save.</div>';
                     return;
                 }
-                listEl.innerHTML = campaigns.map(c => `
+                listEl.innerHTML = tasks.map(c => `
                     <div class="campaign-card ${c.is_active ? 'active-campaign' : ''}">
                         <div class="campaign-info">
                             <div class="campaign-name">${esc(c.name)} ${c.is_active ? '<span class="badge badge-sent">Active</span>' : ''}</div>
-                            <div class="campaign-meta">${esc(c.platform)} / ${esc(c.mode)} -- ${c.sender_username ? '@' + esc(c.sender_username) : 'No sender'}</div>
+                            <div class="campaign-meta">${esc(c.llm_provider || 'openrouter')} / ${esc(c.llm_model || 'default')} ${c.context_canvas_ids ? '| Canvases: ' + esc(c.context_canvas_ids) : ''}</div>
                         </div>
                         <div style="display: flex; gap: 0.5rem;">
-                            <button class="btn btn-secondary" onclick="editCampaign(${c.id})" style="font-size: 0.75rem; padding: 0.25rem 0.625rem;">Edit</button>
-                            <button class="btn ${c.is_active ? 'btn-danger' : 'btn-success'}" onclick="toggleCampaignActive(${c.id}, ${!c.is_active})" style="font-size: 0.75rem; padding: 0.25rem 0.625rem;">
+                            <button class="btn btn-secondary" onclick="editTask(${c.id})" style="font-size: 0.75rem; padding: 0.25rem 0.625rem;">Edit</button>
+                            <button class="btn ${c.is_active ? 'btn-danger' : 'btn-success'}" onclick="toggleTaskActive(${c.id}, ${!c.is_active})" style="font-size: 0.75rem; padding: 0.25rem 0.625rem;">
                                 ${c.is_active ? 'Deactivate' : 'Activate'}
                             </button>
-                            <button class="btn btn-secondary" onclick="deleteCampaign(${c.id})" style="font-size: 0.75rem; padding: 0.25rem 0.625rem; color: #f87171;">Delete</button>
+                            <button class="btn btn-secondary" onclick="deleteTask(${c.id})" style="font-size: 0.75rem; padding: 0.25rem 0.625rem; color: #f87171;">Delete</button>
                         </div>
                     </div>
                 `).join('');
             } catch (e) {
-                console.error('Failed to load campaigns', e);
+                console.error('Failed to load tasks', e);
             }
         }
 
-        async function editCampaign(id) {
+        async function editTask(id) {
             try {
                 const res = await fetch('/api/campaigns/' + id);
                 const c = await res.json();
                 if (c.error) { showToast(c.error, 'error'); return; }
-                loadCampaignIntoForm(c);
-                showToast('Campaign loaded for editing', 'info');
+                loadTaskIntoForm(c);
+                showToast('Task loaded for editing', 'info');
                 window.scrollTo(0, 0);
-            } catch (e) { showToast('Failed to load campaign', 'error'); }
+            } catch (e) { showToast('Failed to load task', 'error'); }
         }
 
-        async function toggleCampaignActive(id, active) {
+        async function toggleTaskActive(id, active) {
             try {
                 const res = await fetch('/api/campaigns/' + id, {
                     method: 'PUT',
@@ -866,142 +926,24 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 });
                 const data = await res.json();
                 if (data.error) { showToast(data.error, 'error'); return; }
-                showToast(active ? 'Campaign activated' : 'Campaign deactivated', 'success');
-                loadCampaigns();
-            } catch (e) { showToast('Failed to update campaign', 'error'); }
+                showToast(active ? 'Task activated' : 'Task deactivated', 'success');
+                loadTasks();
+            } catch (e) { showToast('Failed to update task', 'error'); }
         }
 
-        async function deleteCampaign(id) {
-            if (!confirm('Delete this campaign?')) return;
+        async function deleteTask(id) {
+            if (!confirm('Delete this task?')) return;
             try {
                 const res = await fetch('/api/campaigns/' + id, { method: 'DELETE' });
                 const data = await res.json();
                 if (data.ok) {
-                    if (currentCampaignId === id) { currentCampaignId = null; }
-                    showToast('Campaign deleted', 'success');
-                    loadCampaigns();
+                    if (currentTaskId === id) { currentTaskId = null; }
+                    showToast('Task deleted', 'success');
+                    loadTasks();
                 } else {
                     showToast(data.error || 'Delete failed', 'error');
                 }
-            } catch (e) { showToast('Failed to delete campaign', 'error'); }
-        }
-
-        async function previewMessage() {
-            const data = getCampaignFormData();
-            const btn = document.getElementById('btn-preview');
-            btn.disabled = true; btn.textContent = 'Generating...';
-            try {
-                const res = await fetch('/api/agent/preview', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(data)
-                });
-                const initial = await res.json();
-                if (initial.error) {
-                    document.getElementById('preview-text').textContent = 'Error: ' + initial.error;
-                    document.getElementById('preview-meta').textContent = '';
-                    document.getElementById('preview-result').style.display = '';
-                    btn.disabled = false; btn.textContent = 'Preview Message';
-                    return;
-                }
-                // Static mode returns immediately with status=done
-                if (initial.status === 'done') {
-                    document.getElementById('preview-text').textContent = initial.message;
-                    document.getElementById('preview-meta').textContent = initial.chars + ' characters | Mode: ' + initial.mode + ' | Lead: ' + (initial.lead_name || 'N/A');
-                    document.getElementById('preview-result').style.display = '';
-                    btn.disabled = false; btn.textContent = 'Preview Message';
-                    return;
-                }
-                // Dynamic mode - poll for result
-                const taskId = initial.task_id;
-                let elapsed = 0;
-                const poll = setInterval(async () => {
-                    elapsed += 3;
-                    btn.textContent = 'Generating... (' + elapsed + 's)';
-                    try {
-                        const pr = await fetch('/api/agent/preview/' + taskId);
-                        const pdata = await pr.json();
-                        if (pdata.status === 'generating') return;
-                        clearInterval(poll);
-                        if (pdata.status === 'done') {
-                            document.getElementById('preview-text').textContent = pdata.message;
-                            document.getElementById('preview-meta').textContent = pdata.chars + ' characters | Mode: ' + pdata.mode + ' | Lead: ' + (pdata.lead_name || 'N/A');
-                            document.getElementById('preview-result').style.display = '';
-                        } else {
-                            document.getElementById('preview-text').textContent = 'Error: ' + (pdata.error || 'Unknown error');
-                            document.getElementById('preview-meta').textContent = '';
-                            document.getElementById('preview-result').style.display = '';
-                        }
-                        btn.disabled = false; btn.textContent = 'Preview Message';
-                    } catch (pe) {
-                        clearInterval(poll);
-                        showToast('Preview polling failed', 'error');
-                        btn.disabled = false; btn.textContent = 'Preview Message';
-                    }
-                }, 3000);
-            } catch (e) {
-                showToast('Preview failed', 'error');
-                btn.disabled = false; btn.textContent = 'Preview Message';
-            }
-        }
-
-        async function dryRun() {
-            const data = getCampaignFormData();
-            const btn = document.getElementById('btn-dry-run');
-            btn.disabled = true; btn.textContent = 'Running...';
-            try {
-                const res = await fetch('/api/agent/dry-run', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(data)
-                });
-                const initial = await res.json();
-                if (initial.error) {
-                    showToast('Dry run error: ' + initial.error, 'error');
-                    btn.disabled = false; btn.textContent = 'Dry Run (1 Lead)';
-                    return;
-                }
-                // Static mode returns immediately
-                if (initial.status === 'done') {
-                    showToast('Dry run complete -- message: ' + (initial.message || '').substring(0, 80) + '...', 'success');
-                    document.getElementById('preview-text').textContent = initial.message;
-                    document.getElementById('preview-meta').textContent =
-                        (initial.chars || 0) + ' chars | Would send to: @' + (initial.handle || 'N/A') + ' | Mode: ' + (initial.mode || 'dynamic');
-                    document.getElementById('preview-result').style.display = '';
-                    btn.disabled = false; btn.textContent = 'Dry Run (1 Lead)';
-                    return;
-                }
-                // Dynamic mode - poll for result
-                const taskId = initial.task_id;
-                let elapsed = 0;
-                const poll = setInterval(async () => {
-                    elapsed += 3;
-                    btn.textContent = 'Running... (' + elapsed + 's)';
-                    try {
-                        const pr = await fetch('/api/agent/preview/' + taskId);
-                        const pdata = await pr.json();
-                        if (pdata.status === 'generating') return;
-                        clearInterval(poll);
-                        if (pdata.status === 'done') {
-                            showToast('Dry run complete -- message: ' + (pdata.message || '').substring(0, 80) + '...', 'success');
-                            document.getElementById('preview-text').textContent = pdata.message;
-                            document.getElementById('preview-meta').textContent =
-                                (pdata.chars || 0) + ' chars | Would send to: @' + (pdata.handle || 'N/A') + ' | Mode: ' + (pdata.mode || 'dynamic');
-                            document.getElementById('preview-result').style.display = '';
-                        } else {
-                            showToast('Dry run error: ' + (pdata.error || 'Unknown error'), 'error');
-                        }
-                        btn.disabled = false; btn.textContent = 'Dry Run (1 Lead)';
-                    } catch (pe) {
-                        clearInterval(poll);
-                        showToast('Dry run polling failed', 'error');
-                        btn.disabled = false; btn.textContent = 'Dry Run (1 Lead)';
-                    }
-                }, 3000);
-            } catch (e) {
-                showToast('Dry run failed', 'error');
-                btn.disabled = false; btn.textContent = 'Dry Run (1 Lead)';
-            }
+            } catch (e) { showToast('Failed to delete task', 'error'); }
         }
 
         // ---- Verbose mode ----
@@ -1030,11 +972,82 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 if (data.has_api_key) {
                     document.getElementById('api-key-input').placeholder = 'Key saved (enter new key to replace)';
                 }
+                // OpenRouter settings
+                document.getElementById('openrouter-key-input').value = data.openrouter_key_masked || '';
+                if (data.has_openrouter_key) {
+                    document.getElementById('openrouter-key-input').placeholder = 'Key saved (enter new key to replace)';
+                }
+                document.getElementById('default-model-input').value = data.llm_model || 'qwen/qwen3-235b-a22b';
+                document.getElementById('default-provider-input').value = data.llm_provider || 'openrouter';
                 // Verbose toggle
                 verboseMode = !!data.verbose;
                 document.getElementById('verbose-toggle').checked = verboseMode;
                 document.getElementById('verbose-badge').classList.toggle('active', verboseMode);
             } catch (e) { console.error('Failed to load settings', e); }
+        }
+
+        async function saveOpenRouterKey() {
+            const key = document.getElementById('openrouter-key-input').value.trim();
+            if (!key || key.includes('*')) {
+                showToast('Enter a valid OpenRouter API key', 'error');
+                return;
+            }
+            const btn = document.getElementById('btn-save-or-key');
+            btn.disabled = true; btn.textContent = 'Saving...';
+            try {
+                const res = await fetch('/api/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ openrouter_api_key: key })
+                });
+                const data = await res.json();
+                if (data.ok) {
+                    showToast('OpenRouter API key saved', 'success');
+                    document.getElementById('openrouter-key-input').value = data.openrouter_key_masked || '';
+                } else {
+                    showToast(data.error || 'Failed to save key', 'error');
+                }
+            } catch (e) { showToast('Network error', 'error'); }
+            btn.disabled = false; btn.textContent = 'Save';
+        }
+
+        async function saveLLMDefaults() {
+            const model = document.getElementById('default-model-input').value.trim();
+            const provider = document.getElementById('default-provider-input').value;
+            try {
+                const res = await fetch('/api/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ llm_model: model, llm_provider: provider })
+                });
+                const data = await res.json();
+                if (data.ok) {
+                    showToast('LLM defaults saved', 'success');
+                } else {
+                    showToast(data.error || 'Failed to save', 'error');
+                }
+            } catch (e) { showToast('Network error', 'error'); }
+        }
+
+        async function testLLMConnection() {
+            const btn = document.getElementById('btn-test-llm');
+            btn.disabled = true; btn.textContent = 'Testing...';
+            const statusEl = document.getElementById('openrouter-key-status');
+            statusEl.innerHTML = '<span class="status-dot checking"></span> Testing connection...';
+            try {
+                const res = await fetch('/api/llm/health');
+                const data = await res.json();
+                if (data.ok) {
+                    statusEl.innerHTML = '<span class="status-dot connected"></span> Connected to ' + esc(data.provider);
+                    showToast('LLM connection successful', 'success');
+                } else {
+                    statusEl.innerHTML = '<span class="status-dot disconnected"></span> ' + esc(data.error || 'Connection failed');
+                    showToast(data.error || 'Connection failed', 'error');
+                }
+            } catch (e) {
+                statusEl.innerHTML = '<span class="status-dot disconnected"></span> Network error';
+            }
+            btn.disabled = false; btn.textContent = 'Test';
         }
 
         async function saveApiKey() {
@@ -1388,36 +1401,57 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
                 if _agent_engine.state not in (AgentState.IDLE, AgentState.STOPPED, AgentState.ERROR):
                     return jsonify({"error": "Agent is already running"}), 400
 
-            # Find active campaign
+            # Find active task (campaign)
             campaign = store.get_active_campaign()
             if not campaign:
-                return jsonify({"error": "No active campaign. Go to Campaign tab and activate one."}), 400
+                return jsonify({"error": "No active task. Go to Task tab and activate one."}), 400
 
-            # Get unreached leads with instagram handles
-            unsent_leads = [
-                l for l in store.get_unreached_leads(limit=10000)
-                if l.get("instagram_handle")
-            ]
+            if not campaign.get("user_prompt", "").strip():
+                return jsonify({"error": "Active task has no prompt. Edit the task and add a task prompt."}), 400
 
-            if not unsent_leads:
-                return jsonify({"error": "No unsent leads with Instagram handles available"}), 400
+            # Get leads for context
+            leads = store.get_leads(limit=10000)
 
-            from openreach.llm.client import OllamaClient
+            from openreach.llm.client import LLMClient, LLMProvider
             from openreach.browser.session import BrowserSession
             from openreach.agent.engine import AgentEngine
 
-            llm_cfg = cfg.get("llm", {})
-            llm = OllamaClient(
-                model=llm_cfg.get("model", "qwen3:4b"),
-                base_url=llm_cfg.get("base_url", "http://localhost:11434"),
-                temperature=llm_cfg.get("temperature", 0.7),
+            # Determine LLM config -- task-level overrides > global config
+            current_cfg = load_config()
+            llm_cfg = current_cfg.get("llm", {})
+
+            provider_str = campaign.get("llm_provider") or llm_cfg.get("provider", "openrouter")
+            provider = LLMProvider(provider_str)
+
+            if provider == LLMProvider.OPENROUTER:
+                api_key = llm_cfg.get("openrouter_api_key", "")
+                if not api_key:
+                    return jsonify({"error": "No OpenRouter API key configured. Add one in Settings."}), 400
+                model = campaign.get("llm_model") or llm_cfg.get("model", "qwen/qwen3-235b-a22b")
+                base_url = "https://openrouter.ai/api/v1"
+            else:
+                api_key = ""
+                model = campaign.get("llm_model") or llm_cfg.get("ollama_model", "qwen3:4b")
+                base_url = llm_cfg.get("ollama_base_url", "http://localhost:11434")
+
+            llm = LLMClient(
+                provider=provider,
+                api_key=api_key,
+                model=model,
+                base_url=base_url,
+                temperature=llm_cfg.get("temperature", 0.4),
+                max_tokens=llm_cfg.get("max_tokens", 4096),
+                max_turns=llm_cfg.get("max_turns", 50),
             )
-            browser = BrowserSession(config=cfg)
-            _agent_engine = AgentEngine(llm=llm, browser=browser, store=store)
+            browser = BrowserSession(config=current_cfg)
+            cormass_client = _get_client()
+            _agent_engine = AgentEngine(
+                llm=llm, browser=browser, store=store, cormass_api=cormass_client
+            )
 
             def _run():
                 try:
-                    asyncio.run(_agent_engine.start(campaign, unsent_leads))
+                    asyncio.run(_agent_engine.start(campaign, leads))
                 except Exception as e:
                     import traceback
                     tb = traceback.format_exc()
@@ -1431,7 +1465,12 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
             _agent_thread = threading.Thread(target=_run, daemon=True)
             _agent_thread.start()
 
-        return jsonify({"status": "started", "leads_queued": len(unsent_leads)})
+        return jsonify({
+            "status": "started",
+            "leads_available": len(leads),
+            "provider": provider_str,
+            "model": model,
+        })
 
     @app.route("/api/agent/stop", methods=["POST"])
     def api_agent_stop():  # type: ignore[no-untyped-def]
@@ -1450,6 +1489,8 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
                     "messages_sent": st.messages_sent,
                     "messages_failed": st.messages_failed,
                     "leads_processed": st.leads_processed,
+                    "tool_calls_made": st.tool_calls_made,
+                    "turns_used": st.turns_used,
                 }
                 return jsonify({
                     "state": _agent_engine.state.value if hasattr(_agent_engine.state, 'value') else str(_agent_engine.state),
@@ -1469,12 +1510,12 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
             entries = [e for e in entries if e.get("level") != "debug"]
         return jsonify(entries)
 
-    # ---- Preview & Dry Run (Async Background Tasks) ----
+    # ---- Preview & Dry Run (Legacy - kept for backward compat) ----
 
     @app.route("/api/agent/preview", methods=["POST"])
     def api_agent_preview():  # type: ignore[no-untyped-def]
+        """Generate a quick one-shot LLM response for preview purposes."""
         body = request.get_json(force=True, silent=True) or {}
-        mode = body.get("mode", "dynamic")
 
         # Grab a sample lead
         all_leads = store.get_leads(limit=1)
@@ -1482,22 +1523,12 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
             return jsonify({"error": "No leads in database. Import some first."}), 400
 
         lead = all_leads[0]
-        from openreach.llm.prompts import build_static_message, build_dynamic_prompt, build_system_prompt
 
-        if mode == "static":
-            template = body.get("message_template", "")
-            if not template:
-                return jsonify({"error": "No message template provided"}), 400
-            msg = build_static_message(template, lead)
-            return jsonify({
-                "message": msg,
-                "chars": len(msg),
-                "mode": "static",
-                "lead_name": lead.get("name", ""),
-                "status": "done",
-            })
+        prompt = body.get("user_prompt", "").strip()
+        if not prompt:
+            return jsonify({"error": "No task prompt provided"}), 400
 
-        # Dynamic mode - start background generation
+        # One-shot generation using configured LLM
         import uuid
         task_id = str(uuid.uuid4())[:8]
         with _preview_lock:
@@ -1505,36 +1536,39 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
 
         def _generate_preview():
             try:
-                from openreach.llm.client import OllamaClient
-                system = build_system_prompt(body)
-                user_msg = build_dynamic_prompt(lead, None)
-                llm_cfg = cfg.get("llm", {})
-                llm = OllamaClient(
-                    model=llm_cfg.get("model", "qwen3:4b"),
-                    base_url=llm_cfg.get("base_url", "http://localhost:11434"),
-                    temperature=llm_cfg.get("temperature", 0.7),
-                )
-                msg = llm.generate_sync(prompt=user_msg, system=system)
+                from openreach.llm.client import LLMClient, LLMProvider
+                current = load_config()
+                llm_cfg = current.get("llm", {})
+                provider_str = llm_cfg.get("provider", "openrouter")
+                if provider_str == "openrouter":
+                    api_key = llm_cfg.get("openrouter_api_key", "")
+                    if not api_key:
+                        with _preview_lock:
+                            _preview_tasks[task_id] = {"status": "error", "result": {"error": "No OpenRouter API key"}}
+                        return
+                    llm = LLMClient(provider=LLMProvider.OPENROUTER, api_key=api_key,
+                                     model=llm_cfg.get("model", "qwen/qwen3-235b-a22b"))
+                else:
+                    llm = LLMClient(provider=LLMProvider.OLLAMA,
+                                     base_url=llm_cfg.get("ollama_base_url", "http://localhost:11434"),
+                                     model=llm_cfg.get("ollama_model", "qwen3:4b"))
+
+                system = f"You are a helpful outreach assistant. Write a short message based on these instructions: {prompt}"
+                lead_info = f"Lead: {lead.get('name', 'Unknown')} - {lead.get('business_type', '')} in {lead.get('location', '')}"
+                msg = llm.generate_sync(prompt=lead_info, system=system)
                 import re as _re
                 msg = _re.sub(r'<think>.*?</think>', '', msg, flags=_re.DOTALL).strip()
                 msg = msg.strip('"').strip("'")
+
                 with _preview_lock:
                     _preview_tasks[task_id] = {
                         "status": "done",
-                        "result": {
-                            "message": msg,
-                            "chars": len(msg),
-                            "mode": "dynamic",
-                            "lead_name": lead.get("name", ""),
-                        },
+                        "result": {"message": msg, "chars": len(msg), "mode": "agent", "lead_name": lead.get("name", "")},
                     }
             except Exception as e:
                 logger.error("Preview generation failed: %s", e)
                 with _preview_lock:
-                    _preview_tasks[task_id] = {
-                        "status": "error",
-                        "result": {"error": f"LLM generation failed: {e}"},
-                    }
+                    _preview_tasks[task_id] = {"status": "error", "result": {"error": f"LLM generation failed: {e}"}}
 
         t = threading.Thread(target=_generate_preview, daemon=True)
         t.start()
@@ -1555,33 +1589,19 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
 
     @app.route("/api/agent/dry-run", methods=["POST"])
     def api_agent_dry_run():  # type: ignore[no-untyped-def]
+        """Dry run -- generate a message for one lead without sending."""
         body = request.get_json(force=True, silent=True) or {}
-        mode = body.get("mode", "dynamic")
+        prompt = body.get("user_prompt", "").strip()
 
         all_leads = store.get_leads(limit=1)
         if not all_leads:
             return jsonify({"error": "No leads in database. Import some first."}), 400
 
         lead = all_leads[0]
-        handle = lead.get("instagram_handle", "unknown")
-        from openreach.llm.prompts import build_static_message, build_dynamic_prompt, build_system_prompt
 
-        if mode == "static":
-            template = body.get("message_template", "")
-            if not template:
-                return jsonify({"error": "No message template provided"}), 400
-            msg = build_static_message(template, lead)
-            store.log_activity(
-                campaign_id=None, session_id=None, level="info",
-                message=f"[DRY RUN] Would send to @{handle}: {msg[:100]}..."
-            )
-            return jsonify({
-                "message": msg, "chars": len(msg), "mode": "static",
-                "handle": handle, "lead_name": lead.get("name", ""),
-                "dry_run": True, "status": "done",
-            })
+        if not prompt:
+            return jsonify({"error": "No task prompt provided"}), 400
 
-        # Dynamic mode - background generation
         import uuid
         task_id = str(uuid.uuid4())[:8]
         with _preview_lock:
@@ -1589,39 +1609,45 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
 
         def _generate_dry_run():
             try:
-                from openreach.llm.client import OllamaClient
-                system = build_system_prompt(body)
-                user_msg = build_dynamic_prompt(lead, None)
-                llm_cfg = cfg.get("llm", {})
-                llm = OllamaClient(
-                    model=llm_cfg.get("model", "qwen3:4b"),
-                    base_url=llm_cfg.get("base_url", "http://localhost:11434"),
-                    temperature=llm_cfg.get("temperature", 0.7),
-                )
-                msg = llm.generate_sync(prompt=user_msg, system=system)
+                from openreach.llm.client import LLMClient, LLMProvider
+                current = load_config()
+                llm_cfg = current.get("llm", {})
+                provider_str = llm_cfg.get("provider", "openrouter")
+                if provider_str == "openrouter":
+                    api_key = llm_cfg.get("openrouter_api_key", "")
+                    if not api_key:
+                        with _preview_lock:
+                            _preview_tasks[task_id] = {"status": "error", "result": {"error": "No OpenRouter API key"}}
+                        return
+                    llm = LLMClient(provider=LLMProvider.OPENROUTER, api_key=api_key,
+                                     model=llm_cfg.get("model", "qwen/qwen3-235b-a22b"))
+                else:
+                    llm = LLMClient(provider=LLMProvider.OLLAMA,
+                                     base_url=llm_cfg.get("ollama_base_url", "http://localhost:11434"),
+                                     model=llm_cfg.get("ollama_model", "qwen3:4b"))
+
+                system = f"You are a helpful outreach assistant. Write a short message for this task: {prompt}"
+                lead_info = f"Lead: {lead.get('name', 'Unknown')} - {lead.get('business_type', '')} in {lead.get('location', '')}"
+                msg = llm.generate_sync(prompt=lead_info, system=system)
                 import re as _re
                 msg = _re.sub(r'<think>.*?</think>', '', msg, flags=_re.DOTALL).strip()
                 msg = msg.strip('"').strip("'")
                 store.log_activity(
                     campaign_id=None, session_id=None, level="info",
-                    message=f"[DRY RUN] Would send to @{handle}: {msg[:100]}..."
+                    message=f"[DRY RUN] Preview message for {lead.get('name', 'Unknown')}: {msg[:100]}..."
                 )
                 with _preview_lock:
                     _preview_tasks[task_id] = {
                         "status": "done",
                         "result": {
-                            "message": msg, "chars": len(msg), "mode": "dynamic",
-                            "handle": handle, "lead_name": lead.get("name", ""),
-                            "dry_run": True,
+                            "message": msg, "chars": len(msg), "mode": "agent",
+                            "lead_name": lead.get("name", ""), "dry_run": True,
                         },
                     }
             except Exception as e:
                 logger.error("Dry run generation failed: %s", e)
                 with _preview_lock:
-                    _preview_tasks[task_id] = {
-                        "status": "error",
-                        "result": {"error": f"LLM generation failed: {e}"},
-                    }
+                    _preview_tasks[task_id] = {"status": "error", "result": {"error": f"LLM generation failed: {e}"}}
 
         t = threading.Thread(target=_generate_dry_run, daemon=True)
         t.start()
@@ -1644,20 +1670,32 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
     def api_settings_get():  # type: ignore[no-untyped-def]
         current = load_config()
         cormass = current.get("cormass", {})
+        llm = current.get("llm", {})
         api_key = cormass.get("api_key", "")
         masked = ""
         if api_key:
-            # Show prefix + last 4, mask the rest
             if len(api_key) > 16:
                 masked = api_key[:8] + "*" * (len(api_key) - 12) + api_key[-4:]
             else:
                 masked = "*" * len(api_key)
+        # OpenRouter key masking
+        or_key = llm.get("openrouter_api_key", "")
+        or_masked = ""
+        if or_key:
+            if len(or_key) > 16:
+                or_masked = or_key[:8] + "*" * (len(or_key) - 12) + or_key[-4:]
+            else:
+                or_masked = "*" * len(or_key)
         verbose_raw = current.get("debug", {}).get("verbose", "False")
         verbose = str(verbose_raw).lower() in ("true", "1", "yes")
         return jsonify({
             "has_api_key": bool(api_key),
             "api_key_masked": masked,
             "base_url": cormass.get("base_url", "https://cormass.com/wp-json/leads/v1"),
+            "has_openrouter_key": bool(or_key),
+            "openrouter_key_masked": or_masked,
+            "llm_model": llm.get("model", "qwen/qwen3-235b-a22b"),
+            "llm_provider": llm.get("provider", "openrouter"),
             "verbose": verbose,
         })
 
@@ -1667,6 +1705,9 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
 
         api_key = body.get("api_key")
         base_url = body.get("base_url")
+        openrouter_api_key = body.get("openrouter_api_key")
+        llm_model = body.get("llm_model")
+        llm_provider = body.get("llm_provider")
 
         if api_key is not None:
             api_key = str(api_key).strip()
@@ -1680,14 +1721,66 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
                 return jsonify({"ok": False, "error": "Base URL must start with http:// or https://"})
             save_config_value("cormass.base_url", base_url)
 
-        # Return updated masked key
+        if openrouter_api_key is not None:
+            openrouter_api_key = str(openrouter_api_key).strip()
+            if not openrouter_api_key.startswith("sk-"):
+                return jsonify({"ok": False, "error": "OpenRouter key must start with 'sk-'"})
+            save_config_value("llm.openrouter_api_key", openrouter_api_key)
+
+        if llm_model is not None:
+            save_config_value("llm.model", str(llm_model).strip())
+
+        if llm_provider is not None:
+            if llm_provider not in ("openrouter", "ollama"):
+                return jsonify({"ok": False, "error": "Provider must be 'openrouter' or 'ollama'"})
+            save_config_value("llm.provider", llm_provider)
+
+        # Return updated masked keys
         current = load_config()
         key = current.get("cormass", {}).get("api_key", "")
         masked = ""
         if key and len(key) > 16:
             masked = key[:8] + "*" * (len(key) - 12) + key[-4:]
 
-        return jsonify({"ok": True, "api_key_masked": masked})
+        or_key = current.get("llm", {}).get("openrouter_api_key", "")
+        or_masked = ""
+        if or_key and len(or_key) > 16:
+            or_masked = or_key[:8] + "*" * (len(or_key) - 12) + or_key[-4:]
+
+        return jsonify({"ok": True, "api_key_masked": masked, "openrouter_key_masked": or_masked})
+
+    # ---- LLM Health Check ----
+
+    @app.route("/api/llm/health")
+    def api_llm_health():  # type: ignore[no-untyped-def]
+        current = load_config()
+        llm_cfg = current.get("llm", {})
+        provider = llm_cfg.get("provider", "openrouter")
+
+        from openreach.llm.client import LLMClient, LLMProvider
+        try:
+            if provider == "openrouter":
+                api_key = llm_cfg.get("openrouter_api_key", "")
+                if not api_key:
+                    return jsonify({"ok": False, "error": "No OpenRouter API key configured"})
+                llm = LLMClient(
+                    provider=LLMProvider.OPENROUTER,
+                    api_key=api_key,
+                    model=llm_cfg.get("model", "qwen/qwen3-235b-a22b"),
+                )
+            else:
+                llm = LLMClient(
+                    provider=LLMProvider.OLLAMA,
+                    base_url=llm_cfg.get("ollama_base_url", "http://localhost:11434"),
+                    model=llm_cfg.get("ollama_model", "qwen3:4b"),
+                )
+            healthy = llm.check_health()
+            if healthy:
+                return jsonify({"ok": True, "provider": provider})
+            else:
+                return jsonify({"ok": False, "error": f"{provider} health check failed"})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)})
 
     # ---- Cormass API proxy routes ----
 

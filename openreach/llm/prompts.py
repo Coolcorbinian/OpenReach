@@ -1,10 +1,8 @@
-"""Prompt templates for LLM-powered message generation.
+"""Prompt templates for the OpenReach agent.
 
 Architecture:
-- The user's campaign prompt becomes the SYSTEM message (defines the LLM's role).
-- The lead data + scraped profile become the USER message (context for the LLM).
-- Static mode: pure template substitution, no LLM call needed.
-- Dynamic mode: LLM generates a message using scraped social profile context.
+- build_agent_system_prompt(): Primary prompt for the tool-calling agent
+- Legacy prompt builders kept for backward compatibility
 """
 
 from __future__ import annotations
@@ -13,7 +11,96 @@ import re
 from typing import Any
 
 
-# ---------- Platform-specific configuration ----------
+# ---------- Agent System Prompt ----------
+
+AGENT_SYSTEM_PROMPT = """\
+You are OpenReach Agent, an AI assistant that operates a web browser to complete \
+outreach and research tasks for the user. You interact with websites by calling \
+browser tools (navigate, click, type, screenshot, etc.) and data tools \
+(leads_list_canvases, leads_get_canvas, etc.).
+
+## Core Rules
+
+1. **You control the browser.** The user cannot see the browser -- they rely on \
+your reports. Always use browser_screenshot after navigation or significant page \
+changes to understand the current state.
+
+2. **Be methodical.** Before clicking or typing, confirm you have the right \
+element using browser_screenshot. If an element is not found, try scrolling or \
+waiting.
+
+3. **Report progress.** Use report_progress to keep the user informed of what \
+you are doing. Be specific ("Navigating to Instagram login page", "Typing \
+message to @businessname").
+
+4. **Human-like behavior.** When interacting with social media or websites:
+   - Add delays between actions (use the delay tool with 2-10 seconds)
+   - Do not perform actions faster than a human would
+   - Respect rate limits and site rules
+
+5. **Handle errors gracefully.** If a page does not load, an element is not \
+found, or a login fails, report the error via report_progress and attempt \
+recovery (reload page, try alternative selectors, etc.).
+
+6. **Complete the task.** Keep working until the task is fully done, then call \
+finish_task with a summary. If you cannot complete a task, explain why.
+
+7. **No fabrication.** Only report what you actually see on the page. Do not \
+invent data or pretend actions succeeded if they did not.
+
+8. **Privacy.** Never reveal passwords or API keys in your reasoning or tool \
+call arguments. If credentials are needed, the user provides them separately.
+
+## Available Data
+
+If the user has connected their Cormass Leads account, you can use data tools \
+to access their business lead database. Use leads_list_canvases to see available \
+lead collections, and leads_get_canvas to load lead details.
+
+## Message Writing Guidelines
+
+When writing outreach messages:
+- Keep messages concise and professional
+- Personalize based on the lead's business data
+- Do not be pushy, spammy, or use ALL CAPS
+- Write in the lead's likely language (based on location/business name)
+- After sending, log the message using log_message_sent
+"""
+
+
+def build_agent_system_prompt(
+    campaign: dict[str, Any],
+    leads: list[dict[str, Any]] | None = None,
+) -> str:
+    """Build the full system prompt for the agent.
+
+    Args:
+        campaign: Task/campaign dict with user_prompt, additional_notes, etc.
+        leads: Optional lead list for context
+
+    Returns:
+        Complete system prompt string
+    """
+    parts: list[str] = [AGENT_SYSTEM_PROMPT]
+
+    # Task-specific context from user prompt
+    user_prompt = campaign.get("user_prompt", "").strip()
+    if user_prompt:
+        parts.append(f"\n## User's Task Instructions\n{user_prompt}")
+
+    additional_notes = campaign.get("additional_notes", "").strip()
+    if additional_notes:
+        parts.append(f"\n## Additional Context\n{additional_notes}")
+
+    # Lead count info
+    if leads:
+        parts.append(f"\n## Lead Data\nYou have {len(leads)} leads loaded. "
+                     f"Lead details will be provided in the user message.")
+
+    return "\n".join(parts)
+
+
+# ---------- Legacy Platform Configs (kept for backward compatibility) ----------
 
 PLATFORM_CONFIGS: dict[str, dict[str, Any]] = {
     "instagram": {
@@ -74,20 +161,10 @@ def get_platform_config(platform: str) -> dict[str, Any]:
     return PLATFORM_CONFIGS.get(platform, PLATFORM_CONFIGS["instagram"])
 
 
-# ---------- System prompt builder ----------
+# ---------- Legacy System prompt builder ----------
 
 def build_system_prompt(campaign: dict[str, Any]) -> str:
-    """Build the LLM system prompt from a campaign configuration.
-
-    The user's campaign prompt (user_prompt) defines the LLM's ROLE.
-    Platform guidelines and additional notes are appended.
-
-    Args:
-        campaign: Campaign dict with keys: user_prompt, additional_notes, platform
-
-    Returns:
-        The system prompt string
-    """
+    """Build the LLM system prompt from a campaign configuration (legacy)."""
     platform = campaign.get("platform", "instagram")
     pcfg = get_platform_config(platform)
     user_prompt = campaign.get("user_prompt", "").strip()
@@ -95,7 +172,6 @@ def build_system_prompt(campaign: dict[str, Any]) -> str:
 
     parts: list[str] = []
 
-    # Role definition from user
     if user_prompt:
         parts.append(user_prompt)
     else:
@@ -104,18 +180,15 @@ def build_system_prompt(campaign: dict[str, Any]) -> str:
             f"personalized {pcfg['dm_label']}s to business owners or managers."
         )
 
-    # Platform rules
     parts.append(f"\n--- {pcfg['name']} Guidelines ---")
     parts.append(pcfg["guidelines"])
 
-    # Language instruction
     parts.append(
         "\n--- Language ---\n"
         "Write in the same language as the business name/location if it appears non-English. "
         "Default to English otherwise."
     )
 
-    # Additional notes from user
     if additional_notes:
         parts.append(f"\n--- Additional Context ---\n{additional_notes}")
 
@@ -125,23 +198,8 @@ def build_system_prompt(campaign: dict[str, Any]) -> str:
 # ---------- Static message builder ----------
 
 def build_static_message(template: str, lead: dict[str, Any]) -> str:
-    """Substitute {{placeholders}} in a static message template.
-
-    Supported placeholders:
-        {{name}}, {{business_type}}, {{location}}, {{rating}},
-        {{review_count}}, {{website}}, {{instagram_handle}},
-        {{notes}}, {{pain_points}}, {{offer_context}}
-
-    Unknown placeholders are replaced with empty string.
-
-    Args:
-        template: The message template string
-        lead: Lead data dictionary
-
-    Returns:
-        The filled-in message string
-    """
-    def _replace(match: re.Match) -> str:  # type: ignore[type-arg]
+    """Substitute {{placeholders}} in a static message template."""
+    def _replace(match: re.Match) -> str:
         key = match.group(1).strip().lower()
         value = lead.get(key, "")
         if value is None:
@@ -149,7 +207,6 @@ def build_static_message(template: str, lead: dict[str, Any]) -> str:
         return str(value)
 
     result = re.sub(r"\{\{(\w+)\}\}", _replace, template)
-    # Clean up double spaces / leading/trailing whitespace
     result = re.sub(r"  +", " ", result).strip()
     return result
 
@@ -160,24 +217,12 @@ def build_dynamic_prompt(
     lead: dict[str, Any],
     scraped_profile: dict[str, Any] | None = None,
 ) -> str:
-    """Build the user-message prompt for dynamic (LLM-generated) outreach.
-
-    Combines lead data with scraped social profile information so the LLM
-    can write a highly personalized message.
-
-    Args:
-        lead: Lead data dictionary
-        scraped_profile: Optional scraped social media profile data
-
-    Returns:
-        The formatted user prompt string
-    """
+    """Build the user-message prompt for dynamic (LLM-generated) outreach (legacy)."""
     parts: list[str] = [
         "Write a personalized outreach message to this business. "
         "Use the data below to make it specific and relevant.\n"
     ]
 
-    # --- Lead data ---
     parts.append("=== BUSINESS DATA ===")
     if lead.get("name"):
         parts.append(f"Business Name: {lead['name']}")
@@ -198,7 +243,6 @@ def build_dynamic_prompt(
     if lead.get("offer_context"):
         parts.append(f"Our Offer: {lead['offer_context']}")
 
-    # --- Scraped social profile ---
     if scraped_profile:
         parts.append("\n=== SOCIAL MEDIA PROFILE ===")
         if scraped_profile.get("display_name"):
@@ -226,17 +270,10 @@ def build_dynamic_prompt(
     return "\n".join(parts)
 
 
-# ---------- Reply analysis prompt (for future conversation flow) ----------
+# ---------- Reply analysis prompt ----------
 
 def build_reply_analysis_prompt(conversation: list[dict[str, str]]) -> str:
-    """Build a prompt to analyze a reply and suggest next action.
-
-    Args:
-        conversation: List of message dicts with 'role' and 'content'
-
-    Returns:
-        The formatted prompt string
-    """
+    """Build a prompt to analyze a reply and suggest next action (legacy)."""
     parts = ["Analyze this conversation and suggest the best next action:\n"]
 
     for msg in conversation:
@@ -252,3 +289,46 @@ def build_reply_analysis_prompt(conversation: list[dict[str, str]]) -> str:
     )
 
     return "\n".join(parts)
+
+
+# ---------- Suggested Task Templates ----------
+
+TASK_TEMPLATES = {
+    "instagram_dm": {
+        "name": "Instagram DM Outreach",
+        "prompt": (
+            "For each lead in my list, go to Instagram, find their profile, "
+            "and send them a personalized DM introducing our services. "
+            "Personalize each message based on their business type and location. "
+            "Wait 30-60 seconds between each message. "
+            "Log each message sent using log_message_sent."
+        ),
+    },
+    "email_outreach": {
+        "name": "Email Outreach",
+        "prompt": (
+            "For each lead that has an email address, compose and send a "
+            "personalized cold email. Navigate to my email provider, compose "
+            "a new message, enter the lead's email, write a subject and body "
+            "personalized to their business, and send it. Log each email sent."
+        ),
+    },
+    "research": {
+        "name": "Lead Research",
+        "prompt": (
+            "For each lead in my list, research their business online. "
+            "Visit their website, check their social media profiles, and "
+            "compile key information: services offered, team size, recent news, "
+            "and potential pain points. Report your findings using report_progress."
+        ),
+    },
+    "social_engagement": {
+        "name": "Social Media Engagement",
+        "prompt": (
+            "For each lead, visit their social media profiles and engage "
+            "authentically: like 2-3 recent posts, leave a thoughtful comment "
+            "on one post, and follow their account. Wait 20-40 seconds between "
+            "each action. This is a warm-up before direct outreach."
+        ),
+    },
+}

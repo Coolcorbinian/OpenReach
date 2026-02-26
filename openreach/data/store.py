@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy import create_engine, func
 from sqlalchemy.orm import Session as SASession, sessionmaker
 
-from openreach.data.models import Base, Lead, OutreachLog, Session, Campaign, ActivityLog
+from openreach.data.models import Base, Lead, OutreachLog, Session, Campaign, ActivityLog, AgentTurnLog
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +41,15 @@ class DataStore:
         migrations = [
             ("leads", "scraped_profile", "TEXT", None),
             ("leads", "scraped_at", "DATETIME", None),
+            ("leads", "phone_number", "TEXT", "''"),
+            ("leads", "email", "TEXT", "''"),
+            ("leads", "social_handles", "TEXT", "'{}'"),
+            ("leads", "enrichment_json", "TEXT", None),
             ("outreach_log", "campaign_id", "INTEGER", None),
             ("sessions", "campaign_id", "INTEGER", None),
+            ("campaigns", "context_canvas_ids", "TEXT", "''"),
+            ("campaigns", "llm_provider", "TEXT", "'openrouter'"),
+            ("campaigns", "llm_model", "TEXT", "''"),
         ]
 
         for table, column, col_type, default in migrations:
@@ -102,6 +109,9 @@ class DataStore:
                     "id": l.id,
                     "name": l.name,
                     "instagram_handle": l.instagram_handle,
+                    "phone_number": getattr(l, "phone_number", ""),
+                    "email": getattr(l, "email", ""),
+                    "social_handles": getattr(l, "social_handles", "{}"),
                     "business_type": l.business_type,
                     "location": l.location,
                     "rating": l.rating,
@@ -247,17 +257,20 @@ class DataStore:
     # --- Campaigns ---
 
     def create_campaign(self, data: dict[str, Any]) -> dict[str, Any]:
-        """Create a new campaign. Returns the campaign dict."""
+        """Create a new campaign/task. Returns the campaign dict."""
         with self._session() as session:
             campaign = Campaign(
-                name=data.get("name", "Default Campaign"),
-                platform=data.get("platform", "instagram"),
-                mode=data.get("mode", "dynamic"),
+                name=data.get("name", "Default Task"),
+                platform=data.get("platform", "browser"),
+                mode=data.get("mode", "agent"),
                 user_prompt=data.get("user_prompt", ""),
                 additional_notes=data.get("additional_notes", ""),
                 message_template=data.get("message_template", ""),
                 sender_username=data.get("sender_username", ""),
                 sender_password=data.get("sender_password", ""),
+                context_canvas_ids=data.get("context_canvas_ids", ""),
+                llm_provider=data.get("llm_provider", "openrouter"),
+                llm_model=data.get("llm_model", ""),
                 daily_limit=data.get("daily_limit", 50),
                 session_limit=data.get("session_limit", 15),
                 delay_min=data.get("delay_min", 45),
@@ -278,6 +291,7 @@ class DataStore:
             for key in (
                 "name", "platform", "mode", "user_prompt", "additional_notes",
                 "message_template", "sender_username", "sender_password",
+                "context_canvas_ids", "llm_provider", "llm_model",
                 "daily_limit", "session_limit", "delay_min", "delay_max", "is_active",
             ):
                 if key in data:
@@ -330,6 +344,9 @@ class DataStore:
             "message_template": c.message_template,
             "sender_username": c.sender_username,
             "sender_password": c.sender_password,
+            "context_canvas_ids": getattr(c, "context_canvas_ids", ""),
+            "llm_provider": getattr(c, "llm_provider", "openrouter"),
+            "llm_model": getattr(c, "llm_model", ""),
             "daily_limit": c.daily_limit,
             "session_limit": c.session_limit,
             "delay_min": c.delay_min,
@@ -413,3 +430,66 @@ class DataStore:
                 return json.loads(lead.scraped_profile)
             except (json.JSONDecodeError, TypeError):
                 return None
+
+    # --- Agent Turn Logging ---
+
+    def log_agent_turn(
+        self,
+        campaign_id: int | None,
+        session_id: int | None,
+        turn_number: int,
+        role: str,
+        content: str = "",
+        tool_name: str | None = None,
+        tool_args: str | None = None,
+        tool_result: str | None = None,
+        tokens_used: int = 0,
+    ) -> None:
+        """Record a single agent conversation turn."""
+        with self._session() as session:
+            entry = AgentTurnLog(
+                campaign_id=campaign_id,
+                session_id=session_id,
+                turn_number=turn_number,
+                role=role,
+                content=content[:5000] if content else "",
+                tool_name=tool_name,
+                tool_args=tool_args[:2000] if tool_args else None,
+                tool_result=tool_result[:2000] if tool_result else None,
+                tokens_used=tokens_used,
+            )
+            session.add(entry)
+            session.commit()
+
+    def get_agent_turns(
+        self,
+        campaign_id: int | None = None,
+        session_id: int | None = None,
+        after_id: int | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Get agent turn records for display in the UI."""
+        with self._session() as session:
+            query = session.query(AgentTurnLog)
+            if campaign_id is not None:
+                query = query.filter(AgentTurnLog.campaign_id == campaign_id)
+            if session_id is not None:
+                query = query.filter(AgentTurnLog.session_id == session_id)
+            if after_id is not None:
+                query = query.filter(AgentTurnLog.id > after_id)
+            query = query.order_by(AgentTurnLog.id.desc()).limit(limit)
+            entries = query.all()
+            return [
+                {
+                    "id": e.id,
+                    "turn_number": e.turn_number,
+                    "role": e.role,
+                    "content": e.content,
+                    "tool_name": e.tool_name,
+                    "tool_args": e.tool_args,
+                    "tool_result": e.tool_result,
+                    "tokens_used": e.tokens_used,
+                    "created_at": e.created_at.isoformat() if e.created_at else None,
+                }
+                for e in reversed(entries)
+            ]

@@ -13,9 +13,15 @@ CONFIG_FILE = CONFIG_DIR / "config.yaml"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "llm": {
-        "model": "qwen3:4b",
-        "temperature": 0.7,
-        "base_url": "http://localhost:11434",
+        "provider": "openrouter",
+        "model": "qwen/qwen3-235b-a22b",
+        "temperature": 0.4,
+        "base_url": "",
+        "openrouter_api_key": "",
+        "ollama_model": "qwen3:4b",
+        "ollama_base_url": "http://localhost:11434",
+        "max_tokens": 4096,
+        "max_turns": 50,
     },
     "browser": {
         "headless": False,
@@ -65,6 +71,14 @@ def load_config() -> dict[str, Any]:
     env_model = os.environ.get("OPENREACH_LLM_MODEL")
     if env_model:
         config["llm"]["model"] = env_model
+
+    env_openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+    if env_openrouter_key:
+        config["llm"]["openrouter_api_key"] = env_openrouter_key
+
+    env_provider = os.environ.get("OPENREACH_LLM_PROVIDER")
+    if env_provider:
+        config["llm"]["provider"] = env_provider
 
     return config
 

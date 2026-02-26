@@ -84,7 +84,7 @@ class BrowserSession:
         return self._page
 
     def get_platform_session(self, platform: str) -> PlatformSession:
-        """Get a platform-specific session instance.
+        """Get a platform-specific session instance (legacy).
 
         Args:
             platform: Platform name (instagram, linkedin, twitter, email)
@@ -102,6 +102,12 @@ class BrowserSession:
         if platform == "instagram":
             from openreach.browser.instagram import InstagramSession
             return InstagramSession(self._page)
+        elif platform in ("general", "browser", "agent"):
+            # No platform-specific session needed for agent mode
+            raise ValueError(
+                "Agent mode does not use platform sessions. "
+                "Use the page property directly with browser tools."
+            )
         else:
             raise ValueError(
                 f"Unsupported platform: {platform}. "
