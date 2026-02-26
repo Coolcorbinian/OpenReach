@@ -43,10 +43,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
   "$setupPath = Join-Path $setupDir 'setup.ps1'; " ^
   "Write-Host '  Downloading...' -ForegroundColor Cyan; " ^
   "try { " ^
-  "  (New-Object Net.WebClient).DownloadFile(" ^
-  "    'https://raw.githubusercontent.com/Coolcorbinian/OpenReach/main/installer/setup.ps1', " ^
-  "    $setupPath" ^
-  "  ); " ^
+  "  $headers = @{ 'User-Agent'='OpenReach-Installer/1.0'; 'Accept'='application/vnd.github.v3.raw' }; " ^
+  "  Invoke-WebRequest -Uri 'https://api.github.com/repos/Coolcorbinian/OpenReach/contents/installer/setup.ps1?ref=master' -Headers $headers -OutFile $setupPath -UseBasicParsing; " ^
   "} catch { " ^
   "  Write-Host ''; " ^
   "  Write-Host '  Download failed. Please check your internet connection.' -ForegroundColor Red; " ^

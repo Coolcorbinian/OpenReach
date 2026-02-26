@@ -34,13 +34,12 @@ echo.
 echo   Downloading installer from GitHub...
 echo.
 
-:: Download the setup.ps1 script from GitHub
+:: Download the setup.ps1 script from GitHub (using API to bypass CDN cache)
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
     "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; " ^
     "try { " ^
-    "  $wc = New-Object System.Net.WebClient; " ^
-    "  $wc.Headers.Add('User-Agent', 'OpenReach-Installer/1.0'); " ^
-    "  $wc.DownloadFile('https://raw.githubusercontent.com/Coolcorbinian/OpenReach/master/installer/setup.ps1', '%TEMP_DIR%\setup.ps1'); " ^
+    "  $headers = @{ 'User-Agent'='OpenReach-Installer/1.0'; 'Accept'='application/vnd.github.v3.raw' }; " ^
+    "  Invoke-WebRequest -Uri 'https://api.github.com/repos/Coolcorbinian/OpenReach/contents/installer/setup.ps1?ref=master' -Headers $headers -OutFile '%TEMP_DIR%\setup.ps1' -UseBasicParsing; " ^
     "  Write-Host '  Download complete.' -ForegroundColor Green; " ^
     "} catch { " ^
     "  Write-Host \"  ERROR: Failed to download installer: $_\" -ForegroundColor Red; " ^
@@ -63,9 +62,8 @@ if %errorlevel% neq 0 (
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
     "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; " ^
     "try { " ^
-    "  $wc = New-Object System.Net.WebClient; " ^
-    "  $wc.Headers.Add('User-Agent', 'OpenReach-Installer/1.0'); " ^
-    "  $wc.DownloadFile('https://raw.githubusercontent.com/Coolcorbinian/OpenReach/master/installer/openreach.ico', '%TEMP_DIR%\openreach.ico'); " ^
+    "  $headers = @{ 'User-Agent'='OpenReach-Installer/1.0'; 'Accept'='application/vnd.github.v3.raw' }; " ^
+    "  Invoke-WebRequest -Uri 'https://api.github.com/repos/Coolcorbinian/OpenReach/contents/installer/openreach.ico?ref=master' -Headers $headers -OutFile '%TEMP_DIR%\openreach.ico' -UseBasicParsing; " ^
     "} catch { }" 2>nul
 
 echo.
