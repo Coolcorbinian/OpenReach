@@ -3,8 +3,9 @@
 .SYNOPSIS
     OpenReach Installer Wizard -- full GUI setup for non-technical users.
 .DESCRIPTION
-    Downloads/installs Python, Ollama, the OpenReach project, LLM model,
-    Playwright browser, and creates a desktop shortcut.
+    Downloads/installs Python, the OpenReach project, Playwright browser,
+    and creates a desktop shortcut. Supports OpenRouter (cloud, default)
+    or Ollama (local) as the LLM provider.
     Uses Windows Forms for a native wizard experience with progress bars.
 #>
 
@@ -33,8 +34,11 @@ $script:LogFile        = Join-Path $env:TEMP 'openreach_install.log'
 $script:Cancelled      = $false
 $script:IsUpdate       = $false
 $script:ChildProcess   = $null   # track spawned installers for cancellation
+$script:LLMProvider    = 'openrouter'   # 'openrouter' (default) or 'ollama'
+$script:OpenRouterKey  = ''
+$script:OpenRouterModel = 'google/gemini-2.5-flash'
 
-# Model options: name, display, size, description
+# Model options for Ollama: name, display, size, description
 $script:Models = @(
     @{ Name='qwen3:4b';  Display='Qwen 3 4B (Recommended)'; Size='~2.5 GB'; Desc='Best balance of quality and speed. Runs on most computers with 4 GB RAM.' },
     @{ Name='qwen3:1.7b'; Display='Qwen 3 1.7B (Lightweight)'; Size='~1.0 GB'; Desc='Faster, lower RAM usage. Good for older hardware. Slightly less capable.' },
@@ -294,7 +298,7 @@ $headerTitle.AutoSize = $true
 $header.Controls.Add($headerTitle)
 
 $headerSub = New-Object System.Windows.Forms.Label
-$headerSub.Text = 'Social Media Outreach Agent'
+$headerSub.Text = 'AI-Powered Browser Agent'
 $headerSub.ForeColor = [System.Drawing.Color]::FromArgb(160, 160, 160)
 $headerSub.Font = New-Object System.Drawing.Font('Segoe UI', 9)
 $headerSub.Location = New-Object System.Drawing.Point(26, 44)
@@ -378,7 +382,7 @@ $script:ExistingInstall = Test-Path (Join-Path $script:InstallDir 'openreach\__i
 $w0.Text = if ($script:ExistingInstall) {
     "Welcome to the OpenReach updater.`r`n`r`nAn existing installation was detected at:`r`n$($script:InstallDir)`r`n`r`nThis wizard will update OpenReach to the latest version from GitHub. Your configuration and data will be preserved."
 } else {
-    "Welcome to the OpenReach installer.`r`n`r`nThis wizard will download and set up everything you need to run OpenReach on your computer.`r`n`r`nOpenReach uses a local AI model to generate personalized outreach messages and a browser engine to deliver them -- everything runs on your machine."
+    "Welcome to the OpenReach installer.`r`n`r`nThis wizard will download and set up everything you need to run OpenReach on your computer.`r`n`r`nOpenReach is an AI-powered browser agent that executes tasks you describe in plain language -- browsing, clicking, typing, and extracting data -- all running locally on your machine."
 }
 $w0.Location = New-Object System.Drawing.Point(30, 20)
 $w0.Size = New-Object System.Drawing.Size(570, 110)
@@ -400,14 +404,14 @@ $warnIcon.AutoSize = $true
 $warnBox.Controls.Add($warnIcon)
 
 $warnText = New-Object System.Windows.Forms.Label
-$warnText.Text = "This installer will download up to 3-5 GB of data:`r`n`r`n  - Python (if needed): ~30 MB`r`n  - Ollama (if needed): ~100 MB`r`n  - AI Model: 1 - 5 GB (depending on your choice)`r`n  - Browser Engine: ~150 MB`r`n  - Python Packages: ~50 MB`r`n`r`nPlease use a stable internet connection. Installation may take 10-20 minutes."
+$warnText.Text = "This installer will download up to 0.5 - 5 GB of data:`r`n`r`n  - Python (if needed): ~30 MB`r`n  - Browser Engine: ~150 MB`r`n  - Python Packages: ~50 MB`r`n  - Ollama + AI Model (optional): 1 - 5 GB`r`n`r`nUsing OpenRouter (cloud AI) requires only ~250 MB total.`r`nInstallation takes 5-10 minutes (or 10-20 with Ollama)."
 $warnText.Location = New-Object System.Drawing.Point(12, 35)
 $warnText.Size = New-Object System.Drawing.Size(545, 80)
 $warnText.ForeColor = [System.Drawing.Color]::FromArgb(120, 80, 0)
 $warnBox.Controls.Add($warnText)
 
 $reqLabel = New-Object System.Windows.Forms.Label
-$reqLabel.Text = 'System Requirements: Windows 10/11  |  4 GB RAM minimum  |  6 GB free disk space'
+$reqLabel.Text = 'System Requirements: Windows 10/11  |  4 GB RAM minimum  |  2 GB free disk space (6 GB with Ollama)'
 $reqLabel.Location = New-Object System.Drawing.Point(30, 285)
 $reqLabel.Size = New-Object System.Drawing.Size(570, 20)
 $reqLabel.ForeColor = [System.Drawing.Color]::Gray
@@ -506,19 +510,60 @@ $p2.Controls.Add($locBrowse)
 
 # Model selection
 $mdlLabel = New-Object System.Windows.Forms.Label
-$mdlLabel.Text = 'AI Model:'
+$mdlLabel.Text = 'AI Provider:'
 $mdlLabel.Location = New-Object System.Drawing.Point(30, 85)
 $mdlLabel.AutoSize = $true
 $mdlLabel.Font = New-Object System.Drawing.Font('Segoe UI', 9.5, [System.Drawing.FontStyle]::Bold)
 $p2.Controls.Add($mdlLabel)
 
+# --- LLM Provider radio group ---
+$providerGroup = New-Object System.Windows.Forms.GroupBox
+$providerGroup.Location = New-Object System.Drawing.Point(30, 105)
+$providerGroup.Size = New-Object System.Drawing.Size(570, 55)
+$providerGroup.Text = ''
+$p2.Controls.Add($providerGroup)
+
+$rbOpenRouter = New-Object System.Windows.Forms.RadioButton
+$rbOpenRouter.Text = 'OpenRouter (Cloud AI -- recommended, requires API key)'
+$rbOpenRouter.Location = New-Object System.Drawing.Point(15, 8)
+$rbOpenRouter.Size = New-Object System.Drawing.Size(530, 20)
+$rbOpenRouter.Checked = $true
+$rbOpenRouter.Font = New-Object System.Drawing.Font('Segoe UI', 9.5)
+$providerGroup.Controls.Add($rbOpenRouter)
+
+$rbOllama = New-Object System.Windows.Forms.RadioButton
+$rbOllama.Text = 'Ollama (Local AI -- requires 4+ GB RAM, large downloads)'
+$rbOllama.Location = New-Object System.Drawing.Point(15, 30)
+$rbOllama.Size = New-Object System.Drawing.Size(530, 20)
+$rbOllama.Font = New-Object System.Drawing.Font('Segoe UI', 9.5)
+$providerGroup.Controls.Add($rbOllama)
+
+# --- OpenRouter API key input ---
+$orKeyLabel = New-Object System.Windows.Forms.Label
+$orKeyLabel.Text = 'OpenRouter API Key (get one free at openrouter.ai):'
+$orKeyLabel.Location = New-Object System.Drawing.Point(30, 168)
+$orKeyLabel.Size = New-Object System.Drawing.Size(400, 18)
+$orKeyLabel.Font = New-Object System.Drawing.Font('Segoe UI', 8.5)
+$orKeyLabel.ForeColor = [System.Drawing.Color]::FromArgb(80, 80, 80)
+$p2.Controls.Add($orKeyLabel)
+
+$orKeyBox = New-Object System.Windows.Forms.TextBox
+$orKeyBox.Location = New-Object System.Drawing.Point(30, 188)
+$orKeyBox.Size = New-Object System.Drawing.Size(570, 26)
+$orKeyBox.Font = New-Object System.Drawing.Font('Consolas', 9)
+$orKeyBox.Text = ''
+$orKeyBox.PlaceholderText = 'sk-or-...'
+$p2.Controls.Add($orKeyBox)
+
+# --- Ollama model selection (hidden by default) ---
 $mdlGroup = New-Object System.Windows.Forms.GroupBox
-$mdlGroup.Location = New-Object System.Drawing.Point(30, 105)
+$mdlGroup.Location = New-Object System.Drawing.Point(30, 165)
 $mdlGroup.Size = New-Object System.Drawing.Size(570, 145)
-$mdlGroup.Text = ''
+$mdlGroup.Text = 'Ollama Model'
+$mdlGroup.Visible = $false
 $p2.Controls.Add($mdlGroup)
 
-$yOff = 15
+$yOff = 18
 $script:ModelRadios = @()
 foreach ($m in $script:Models) {
     $rb = New-Object System.Windows.Forms.RadioButton
@@ -541,6 +586,19 @@ foreach ($m in $script:Models) {
 
     $yOff += 42
 }
+
+# Toggle visibility when provider changes
+$rbOpenRouter.Add_CheckedChanged({
+    if ($rbOpenRouter.Checked) {
+        $orKeyLabel.Visible = $true
+        $orKeyBox.Visible = $true
+        $mdlGroup.Visible = $false
+    } else {
+        $orKeyLabel.Visible = $false
+        $orKeyBox.Visible = $false
+        $mdlGroup.Visible = $true
+    }
+})
 
 # Desktop shortcut
 $scCheck = New-Object System.Windows.Forms.CheckBox
@@ -596,19 +654,28 @@ function Update-ComponentCheck {
     }
     $chkList.Items.Add($pyItem)
 
-    # Ollama
-    Find-Ollama | Out-Null
-    $olItem = New-Object System.Windows.Forms.ListViewItem('Ollama')
-    if ($script:HasOllama) {
-        $olItem.SubItems.Add('Installed')
-        $olItem.SubItems.Add('Already installed')
-        $olItem.ForeColor = [System.Drawing.Color]::FromArgb(0, 128, 0)
+    # Ollama (only if user chose Ollama provider)
+    if ($script:LLMProvider -eq 'ollama') {
+        Find-Ollama | Out-Null
+        $olItem = New-Object System.Windows.Forms.ListViewItem('Ollama')
+        if ($script:HasOllama) {
+            $olItem.SubItems.Add('Installed')
+            $olItem.SubItems.Add('Already installed')
+            $olItem.ForeColor = [System.Drawing.Color]::FromArgb(0, 128, 0)
+        } else {
+            $olItem.SubItems.Add('Not found')
+            $olItem.SubItems.Add('Will download and install (~100 MB)')
+            $olItem.ForeColor = [System.Drawing.Color]::FromArgb(200, 120, 0)
+        }
+        $chkList.Items.Add($olItem)
     } else {
-        $olItem.SubItems.Add('Not found')
-        $olItem.SubItems.Add('Will download and install (~100 MB)')
-        $olItem.ForeColor = [System.Drawing.Color]::FromArgb(200, 120, 0)
+        # OpenRouter -- show as ready
+        $orItem = New-Object System.Windows.Forms.ListViewItem('OpenRouter (Cloud AI)')
+        $orItem.SubItems.Add('API Key provided')
+        $orItem.SubItems.Add('No local install needed')
+        $orItem.ForeColor = [System.Drawing.Color]::FromArgb(0, 128, 0)
+        $chkList.Items.Add($orItem)
     }
-    $chkList.Items.Add($olItem)
 
     # Git
     Find-Git | Out-Null
@@ -624,20 +691,23 @@ function Update-ComponentCheck {
     }
     $chkList.Items.Add($gitItem)
 
-    # AI Model
-    $mdlItem = New-Object System.Windows.Forms.ListViewItem("AI Model ($($script:SelectedModel))")
-    $mdlSize = ($script:Models | Where-Object { $_.Name -eq $script:SelectedModel }).Size
-    $script:ModelAlreadyInstalled = Test-OllamaModelInstalled $script:SelectedModel
-    if ($script:ModelAlreadyInstalled) {
-        $mdlItem.SubItems.Add('Installed')
-        $mdlItem.SubItems.Add('Already downloaded')
-        $mdlItem.ForeColor = [System.Drawing.Color]::FromArgb(0, 128, 0)
-    } else {
-        $mdlItem.SubItems.Add('Not found')
-        $mdlItem.SubItems.Add("Will download ($mdlSize)")
-        $mdlItem.ForeColor = [System.Drawing.Color]::FromArgb(200, 120, 0)
+    # AI Model (only for Ollama provider)
+    $script:ModelAlreadyInstalled = $false
+    if ($script:LLMProvider -eq 'ollama') {
+        $mdlItem = New-Object System.Windows.Forms.ListViewItem("AI Model ($($script:SelectedModel))")
+        $mdlSize = ($script:Models | Where-Object { $_.Name -eq $script:SelectedModel }).Size
+        $script:ModelAlreadyInstalled = Test-OllamaModelInstalled $script:SelectedModel
+        if ($script:ModelAlreadyInstalled) {
+            $mdlItem.SubItems.Add('Installed')
+            $mdlItem.SubItems.Add('Already downloaded')
+            $mdlItem.ForeColor = [System.Drawing.Color]::FromArgb(0, 128, 0)
+        } else {
+            $mdlItem.SubItems.Add('Not found')
+            $mdlItem.SubItems.Add("Will download ($mdlSize)")
+            $mdlItem.ForeColor = [System.Drawing.Color]::FromArgb(200, 120, 0)
+        }
+        $chkList.Items.Add($mdlItem)
     }
-    $chkList.Items.Add($mdlItem)
 
     # Browser
     $brItem = New-Object System.Windows.Forms.ListViewItem('Playwright Chromium')
@@ -656,14 +726,14 @@ function Update-ComponentCheck {
     # Summary
     $downloads = @()
     if (-not $script:HasPython) { $downloads += 'Python' }
-    if (-not $script:HasOllama) { $downloads += 'Ollama' }
+    if ($script:LLMProvider -eq 'ollama' -and -not $script:HasOllama) { $downloads += 'Ollama' }
     $downloads += 'OpenReach'
-    if (-not $script:ModelAlreadyInstalled) { $downloads += "AI Model ($mdlSize)" }
+    if ($script:LLMProvider -eq 'ollama' -and -not $script:ModelAlreadyInstalled) { $downloads += "AI Model ($mdlSize)" }
     if (-not $script:PlaywrightAlreadyInstalled) { $downloads += 'Browser Engine' }
 
     $actionWord = if ($script:IsUpdate) { 'Update' } else { 'Install' }
     if ($downloads.Count -gt 0) {
-        $chkSummary.Text = "Click '$actionWord' to begin. The following will be downloaded:`r`n$($downloads -join ', ')`r`n`r`nThis may take 10-20 minutes depending on your internet speed."
+        $chkSummary.Text = "Click '$actionWord' to begin. The following will be downloaded:`r`n$($downloads -join ', ')`r`n`r`nEstimated time: $(if ($script:LLMProvider -eq 'ollama') { '10-20 minutes' } else { '5-10 minutes' })."
     } else {
         $chkSummary.Text = "Click '$actionWord' to begin. All components are already present.`r`nThe $($actionWord.ToLower()) should complete quickly."
     }
@@ -1033,7 +1103,8 @@ function Start-Installation {
         Set-InstallProgress 20 'Python ready' ''
         Test-Cancelled
 
-        # --- Step 2: Install Ollama if needed (20-35%) ---
+        # --- Step 2: Install Ollama if needed and selected (20-35%) ---
+        if ($script:LLMProvider -eq 'ollama') {
         if (-not $script:HasOllama) {
             Set-InstallProgress 22 'Installing Ollama...' 'Downloading Ollama installer'
             Add-InstallLog 'Ollama not found. Downloading...'
@@ -1070,6 +1141,10 @@ function Start-Installation {
             Add-InstallLog "Ollama already installed: $($script:OllamaPath)"
         }
         Set-InstallProgress 35 'Ollama ready' ''
+        } else {
+            Add-InstallLog 'Using OpenRouter (cloud AI). Skipping Ollama installation.'
+            Set-InstallProgress 35 'OpenRouter selected' ''
+        }
         Test-Cancelled
 
         # --- Step 3: Download OpenReach (35-50%) ---
@@ -1198,7 +1273,8 @@ function Start-Installation {
         Set-InstallProgress 80 'Browser engine ready' ''
         Test-Cancelled
 
-        # --- Step 6: Start Ollama and pull model (80-95%) ---
+        # --- Step 6: Start Ollama and pull model (80-95%) -- only for Ollama provider ---
+        if ($script:LLMProvider -eq 'ollama') {
         Set-InstallProgress 82 'Setting up AI model...' 'Starting Ollama'
         Add-InstallLog "Setting up AI model: $($script:SelectedModel)"
 
@@ -1284,6 +1360,11 @@ function Start-Installation {
             Add-InstallLog "After installation, start Ollama and run: ollama pull $($script:SelectedModel)"
         }
         Set-InstallProgress 95 'AI model ready' ''
+        } else {
+            # OpenRouter mode -- no model download needed
+            Add-InstallLog 'Using OpenRouter cloud AI. No local model download required.'
+            Set-InstallProgress 95 'OpenRouter configured' ''
+        }
 
         # --- Step 7: Create desktop shortcut (95-98%) ---
         Set-InstallProgress 96 'Creating shortcut...' ''
@@ -1299,7 +1380,7 @@ function Start-Installation {
                 $sc = $shell.CreateShortcut($shortcutPath)
                 $sc.TargetPath = $batPath
                 $sc.WorkingDirectory = $installTarget
-                $sc.Description = 'Launch OpenReach - Social Media Outreach Agent'
+                $sc.Description = 'Launch OpenReach - AI-Powered Browser Agent'
                 $sc.WindowStyle = 1
                 # Try to set icon from Python or default
                 $iconPath = Join-Path $installTarget 'installer\openreach.ico'
@@ -1325,11 +1406,29 @@ function Start-Installation {
         $legalFile = Join-Path $configDir '.legal_accepted'
         "accepted=$(Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')" | Out-File $legalFile -Encoding utf8
 
-        # Write default config with selected model
+        # Write default config with selected provider/model
         $configFile = Join-Path $configDir 'config.yaml'
         if (-not (Test-Path $configFile)) {
-            @"
+            if ($script:LLMProvider -eq 'openrouter') {
+                @"
 llm:
+  provider: openrouter
+  openrouter_api_key: $($script:OpenRouterKey)
+  openrouter_model: $($script:OpenRouterModel)
+  temperature: 0.7
+
+browser:
+  headless: false
+  slow_mo: 50
+
+ui:
+  host: 127.0.0.1
+  port: 5000
+"@ | Out-File $configFile -Encoding utf8
+            } else {
+                @"
+llm:
+  provider: ollama
   model: $($script:SelectedModel)
   temperature: 0.7
   base_url: http://localhost:11434
@@ -1338,16 +1437,11 @@ browser:
   headless: false
   slow_mo: 50
 
-outreach:
-  delay_min: 45
-  delay_max: 180
-  daily_limit: 50
-  session_limit: 15
-
 ui:
   host: 127.0.0.1
   port: 5000
 "@ | Out-File $configFile -Encoding utf8
+            }
             Add-InstallLog "Config written to $configFile"
         }
 
@@ -1361,7 +1455,7 @@ ui:
         Add-InstallLog '--- Installation complete! ---'
 
         # Transition to completion page
-        $doneSummary.Text = "OpenReach has been installed successfully.`r`n`r`nInstalled to: $installTarget`r`nAI Model: $($script:SelectedModel)`r`nDesktop Shortcut: $(if ($script:CreateShortcut) { 'Created' } else { 'Skipped' })`r`n`r`nYou can start using OpenReach right away.`r`nJust double-click the desktop shortcut or 'Start OpenReach.bat'."
+        $doneSummary.Text = "OpenReach has been installed successfully.`r`n`r`nInstalled to: $installTarget`r`nAI Provider: $(if ($script:LLMProvider -eq 'openrouter') { 'OpenRouter (Cloud)' } else { "Ollama -- $($script:SelectedModel)" })`r`nDesktop Shortcut: $(if ($script:CreateShortcut) { 'Created' } else { 'Skipped' })`r`n`r`nYou can start using OpenReach right away.`r`nJust double-click the desktop shortcut or 'Start OpenReach.bat'."
 
         $btnNext.Enabled = $true
         $btnNext.Text = 'Finish'
@@ -1468,6 +1562,13 @@ $btnNext.Add_Click({
             # Options -> Component Check
             $script:InstallDir = $locBox.Text.Trim()
             $script:CreateShortcut = $scCheck.Checked
+            # Capture LLM provider choice
+            if ($rbOpenRouter.Checked) {
+                $script:LLMProvider = 'openrouter'
+                $script:OpenRouterKey = $orKeyBox.Text.Trim()
+            } else {
+                $script:LLMProvider = 'ollama'
+            }
             foreach ($rb in $script:ModelRadios) {
                 if ($rb.Checked) { $script:SelectedModel = $rb.Tag; break }
             }

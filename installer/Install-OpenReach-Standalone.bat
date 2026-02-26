@@ -28,7 +28,7 @@ if not exist "%TEMP_DIR%" mkdir "%TEMP_DIR%"
 echo.
 echo   ======================================================
 echo     OpenReach Installer
-echo     Social Media Outreach Agent
+echo     AI-Powered Browser Agent
 echo   ======================================================
 echo.
 echo   Downloading installer from GitHub...

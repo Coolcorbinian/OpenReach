@@ -15,13 +15,12 @@ echo   This will download and install OpenReach on your computer.
 echo.
 echo   What gets installed:
 echo     - Python 3.13 (if not already installed)
-echo     - Ollama AI runtime (if not already installed)
 echo     - OpenReach application from GitHub
-echo     - AI model for message generation
 echo     - Chromium browser engine for automation
+echo     - Ollama AI runtime (optional, if selected)
 echo.
-echo   Total download: 3-5 GB  ^|  Time: 10-20 minutes
-echo   Requires: Windows 10/11, 4 GB RAM, 6 GB disk space
+echo   Total download: 0.5-5 GB  ^|  Time: 5-20 minutes
+echo   Requires: Windows 10/11, 4 GB RAM, 2 GB disk space
 echo.
 echo   Press any key to start, or close this window to cancel.
 echo.
