@@ -551,8 +551,20 @@ $orKeyBox = New-Object System.Windows.Forms.TextBox
 $orKeyBox.Location = New-Object System.Drawing.Point(30, 188)
 $orKeyBox.Size = New-Object System.Drawing.Size(570, 26)
 $orKeyBox.Font = New-Object System.Drawing.Font('Consolas', 9)
-$orKeyBox.Text = ''
-$orKeyBox.PlaceholderText = 'sk-or-...'
+$orKeyBox.Text = 'sk-or-...'
+$orKeyBox.ForeColor = [System.Drawing.Color]::Gray
+$orKeyBox.Add_GotFocus({
+    if ($orKeyBox.Text -eq 'sk-or-...') {
+        $orKeyBox.Text = ''
+        $orKeyBox.ForeColor = [System.Drawing.Color]::Black
+    }
+})
+$orKeyBox.Add_LostFocus({
+    if ([string]::IsNullOrWhiteSpace($orKeyBox.Text)) {
+        $orKeyBox.Text = 'sk-or-...'
+        $orKeyBox.ForeColor = [System.Drawing.Color]::Gray
+    }
+})
 $p2.Controls.Add($orKeyBox)
 
 # --- Ollama model selection (hidden by default) ---
@@ -1565,7 +1577,9 @@ $btnNext.Add_Click({
             # Capture LLM provider choice
             if ($rbOpenRouter.Checked) {
                 $script:LLMProvider = 'openrouter'
-                $script:OpenRouterKey = $orKeyBox.Text.Trim()
+                $keyVal = $orKeyBox.Text.Trim()
+                if ($keyVal -eq 'sk-or-...') { $keyVal = '' }
+                $script:OpenRouterKey = $keyVal
             } else {
                 $script:LLMProvider = 'ollama'
             }
