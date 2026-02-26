@@ -45,6 +45,9 @@ openreach = "openreach.cli:main"
 requires = ["setuptools>=75.0"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.packages.find]
+include = ["openreach*"]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 100
