@@ -55,6 +55,8 @@ class StreamChunk:
     tool_args: dict[str, Any] | None = None
     tool_call_id: str | None = None
     turn_number: int = 0
+    tokens_used: int = 0
+    cost: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +96,7 @@ class AgentTurn:
     tool_args: str | None = None  # JSON string
     tool_result: str | None = None
     tokens_used: int = 0
+    cost: float = 0.0
     timestamp: float = field(default_factory=time.time)
 
 
@@ -105,7 +108,7 @@ class LLMClient:
     """Multi-provider LLM client with agentic tool-calling loop.
 
     Usage:
-        client = LLMClient(provider="openrouter", api_key="sk-...", model="qwen/qwen3-235b-a22b")
+        client = LLMClient(provider="openrouter", api_key="sk-...", model="qwen/qwen3-235b-a22b-2507")
         tools = [ToolDef(name="browser_navigate", ...)]
 
         # Streaming tool-calling loop
@@ -119,7 +122,7 @@ class LLMClient:
         self,
         provider: str = "openrouter",
         api_key: str = "",
-        model: str = "qwen/qwen3-235b-a22b",
+        model: str = "qwen/qwen3-235b-a22b-2507",
         base_url: str = "",
         temperature: float = 0.4,
         max_tokens: int = 4096,
@@ -170,6 +173,51 @@ class LLMClient:
 
         return await self._run_agent_openrouter(system_prompt, user_message, tools, on_chunk)
 
+    @staticmethod
+    def _parse_openrouter_error(status_code: int, body: str) -> str:
+        """Parse an OpenRouter error response into a human-readable message."""
+        try:
+            data = json.loads(body)
+            err = data.get("error", {})
+            msg = err.get("message", "").strip()
+            code = err.get("code", status_code)
+            meta = err.get("metadata", {})
+
+            parts = [f"OpenRouter error {code}"]
+
+            if status_code == 404:
+                avail = meta.get("available_providers", [])
+                requested = meta.get("requested_providers", [])
+                if avail or requested:
+                    parts.append(f"Model not available. Available providers: {', '.join(avail) if avail else 'none'}")
+                    if requested:
+                        parts.append(f"Requested providers: {', '.join(requested)}")
+                    parts.append("Fix: Check model ID on openrouter.ai/models or switch to a model with more providers")
+                else:
+                    parts.append(msg or "Model not found")
+
+            elif status_code == 401:
+                parts.append("Invalid API key. Check your OpenRouter key in Settings.")
+
+            elif status_code == 402:
+                parts.append("Insufficient credits. Top up at openrouter.ai/credits")
+
+            elif status_code == 429:
+                parts.append("Rate limited. Will retry after delay.")
+
+            elif status_code == 408 or status_code == 504:
+                parts.append("Request timed out at provider. Will retry.")
+
+            elif status_code == 502 or status_code == 503:
+                parts.append(f"Provider temporarily unavailable. Will retry. ({msg})")
+
+            else:
+                parts.append(msg or body[:300])
+
+            return " | ".join(parts)
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return f"OpenRouter error {status_code}: {body[:400]}"
+
     async def _run_agent_openrouter(
         self,
         system_prompt: str,
@@ -187,6 +235,18 @@ class LLMClient:
         tool_map = {t.name: t for t in tools} if tools else {}
         turns: list[AgentTurn] = []
         turn_number = 0
+
+        # Cumulative token/cost tracking (Item 9)
+        cumulative_tokens = 0
+        cumulative_cost = 0.0
+
+        # Retry config for transient errors (429, 502, 503, 504, timeouts)
+        MAX_RETRIES = 3
+        RETRY_BACKOFF = [5, 15, 30]  # seconds
+
+        # Context window management threshold (Item 8)
+        # When the message list gets long, summarize older turns
+        MAX_CONTEXT_MESSAGES = 60  # Summarize when exceeding this count
 
         async with httpx.AsyncClient(timeout=self.timeout) as http:
             while turn_number < self.max_turns:
@@ -210,29 +270,105 @@ class LLMClient:
                     "X-Title": "OpenReach Agent",
                 }
 
-                # --- Send request ---
-                try:
-                    resp = await http.post(
-                        f"{self.base_url}/chat/completions",
-                        json=payload,
-                        headers=headers,
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                except httpx.HTTPStatusError as e:
-                    error_msg = f"OpenRouter API error: {e.response.status_code} - {e.response.text[:500]}"
-                    logger.error(error_msg)
-                    if on_chunk:
-                        await on_chunk(StreamChunk(type=ChunkType.ERROR, content=error_msg, turn_number=turn_number))
-                    turns.append(AgentTurn(turn_number=turn_number, role="error", content=error_msg))
-                    break
-                except httpx.ConnectError as e:
-                    error_msg = f"Cannot connect to OpenRouter: {e}"
-                    logger.error(error_msg)
-                    if on_chunk:
-                        await on_chunk(StreamChunk(type=ChunkType.ERROR, content=error_msg, turn_number=turn_number))
-                    turns.append(AgentTurn(turn_number=turn_number, role="error", content=error_msg))
-                    break
+                logger.info("OpenRouter request (turn %d): model=%s, messages=%d, tools=%d",
+                           turn_number, self.model, len(messages),
+                           len(tool_schemas) if tool_schemas else 0)
+
+                # --- Send request with retry logic ---
+                data = None
+                last_error_msg = ""
+                for attempt in range(MAX_RETRIES + 1):
+                    try:
+                        resp = await http.post(
+                            f"{self.base_url}/chat/completions",
+                            json=payload,
+                            headers=headers,
+                        )
+                        resp.raise_for_status()
+                        data = resp.json()
+
+                        # Log response summary
+                        provider = data.get("provider", "unknown")
+                        choice0 = data.get("choices", [{}])[0]
+                        logger.info(
+                            "OpenRouter response (turn %d): provider=%s, model=%s, finish=%s, tool_calls=%s",
+                            turn_number, provider, data.get("model", "?"),
+                            choice0.get("finish_reason", "?"),
+                            bool(choice0.get("message", {}).get("tool_calls")),
+                        )
+                        break  # Success
+
+                    except httpx.HTTPStatusError as e:
+                        status = e.response.status_code
+                        body = e.response.text[:1000]
+                        last_error_msg = self._parse_openrouter_error(status, body)
+                        logger.error("OpenRouter HTTP %d (attempt %d/%d): %s",
+                                    status, attempt + 1, MAX_RETRIES + 1, last_error_msg)
+
+                        # Retryable errors: 429 rate limit, 502/503/504 provider issues, 408 timeout
+                        if status in (429, 502, 503, 504, 408) and attempt < MAX_RETRIES:
+                            delay = RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)]
+                            logger.info("Retrying in %ds...", delay)
+                            if on_chunk:
+                                await on_chunk(StreamChunk(
+                                    type=ChunkType.ERROR,
+                                    content=f"{last_error_msg} -- retrying in {delay}s (attempt {attempt + 2}/{MAX_RETRIES + 1})",
+                                    turn_number=turn_number,
+                                ))
+                            await asyncio.sleep(delay)
+                            continue
+
+                        # Non-retryable: 401 auth, 402 credits, 404 model not found, etc.
+                        if on_chunk:
+                            await on_chunk(StreamChunk(
+                                type=ChunkType.ERROR, content=last_error_msg, turn_number=turn_number,
+                            ))
+                        turns.append(AgentTurn(turn_number=turn_number, role="error", content=last_error_msg))
+                        break  # inner retry loop
+
+                    except httpx.ConnectError as e:
+                        last_error_msg = f"Cannot connect to OpenRouter: {e}"
+                        logger.error("%s (attempt %d/%d)", last_error_msg, attempt + 1, MAX_RETRIES + 1)
+                        if attempt < MAX_RETRIES:
+                            delay = RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)]
+                            if on_chunk:
+                                await on_chunk(StreamChunk(
+                                    type=ChunkType.ERROR,
+                                    content=f"{last_error_msg} -- retrying in {delay}s",
+                                    turn_number=turn_number,
+                                ))
+                            await asyncio.sleep(delay)
+                            continue
+                        if on_chunk:
+                            await on_chunk(StreamChunk(
+                                type=ChunkType.ERROR, content=last_error_msg, turn_number=turn_number,
+                            ))
+                        turns.append(AgentTurn(turn_number=turn_number, role="error", content=last_error_msg))
+                        break
+
+                    except httpx.ReadTimeout as e:
+                        last_error_msg = f"OpenRouter request timed out after {self.timeout}s (model may be overloaded)"
+                        logger.error("%s (attempt %d/%d)", last_error_msg, attempt + 1, MAX_RETRIES + 1)
+                        if attempt < MAX_RETRIES:
+                            delay = RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)]
+                            if on_chunk:
+                                await on_chunk(StreamChunk(
+                                    type=ChunkType.ERROR,
+                                    content=f"{last_error_msg} -- retrying in {delay}s",
+                                    turn_number=turn_number,
+                                ))
+                            await asyncio.sleep(delay)
+                            continue
+                        if on_chunk:
+                            await on_chunk(StreamChunk(
+                                type=ChunkType.ERROR, content=last_error_msg, turn_number=turn_number,
+                            ))
+                        turns.append(AgentTurn(turn_number=turn_number, role="error", content=last_error_msg))
+                        break
+
+                # If data is None after retries, the inner loop already handled error emission
+                if data is None:
+                    break  # exit outer turn loop
 
                 # --- Parse response ---
                 choice = data.get("choices", [{}])[0]
@@ -240,12 +376,35 @@ class LLMClient:
                 finish_reason = choice.get("finish_reason", "")
                 usage = data.get("usage", {})
                 tokens = usage.get("total_tokens", 0)
+                turn_cost = float(usage.get("cost", 0) or 0)
+
+                # Cumulative tracking (Item 9)
+                cumulative_tokens += tokens
+                cumulative_cost += turn_cost
 
                 content = message.get("content") or ""
                 tool_calls = message.get("tool_calls") or []
 
-                # Append assistant message to conversation
-                messages.append(message)
+                # Append assistant message to conversation (sanitized for API compatibility)
+                clean_msg: dict[str, Any] = {"role": "assistant"}
+                if content:
+                    clean_msg["content"] = content
+                else:
+                    clean_msg["content"] = ""
+                if tool_calls:
+                    # Only keep the fields that OpenAI-compatible APIs expect
+                    clean_tcs = []
+                    for tc in tool_calls:
+                        clean_tcs.append({
+                            "id": tc.get("id", ""),
+                            "type": "function",
+                            "function": {
+                                "name": tc.get("function", {}).get("name", ""),
+                                "arguments": tc.get("function", {}).get("arguments", "{}"),
+                            },
+                        })
+                    clean_msg["tool_calls"] = clean_tcs
+                messages.append(clean_msg)
 
                 # --- Emit reasoning/content ---
                 if content:
@@ -254,6 +413,7 @@ class LLMClient:
                         role="assistant",
                         content=content,
                         tokens_used=tokens,
+                        cost=turn_cost,
                     )
                     turns.append(turn)
                     if on_chunk:
@@ -261,6 +421,8 @@ class LLMClient:
                             type=ChunkType.CONTENT if not tool_calls else ChunkType.REASONING,
                             content=content,
                             turn_number=turn_number,
+                            tokens_used=cumulative_tokens,
+                            cost=cumulative_cost,
                         ))
 
                 # --- Handle tool calls ---
@@ -331,6 +493,35 @@ class LLMClient:
                         })
 
                     # Continue loop -- LLM needs to process tool results
+                    # Context window management (Item 8): trim old messages to prevent overflow
+                    if len(messages) > MAX_CONTEXT_MESSAGES:
+                        # Keep system prompt (index 0), user message (index 1), and the latest messages
+                        # Summarize the middle section
+                        keep_start = 2  # after system + user
+                        keep_recent = 30  # keep the last N messages for context continuity
+                        to_remove = messages[keep_start:-keep_recent]
+                        summary_parts = []
+                        for msg in to_remove:
+                            role = msg.get("role", "?")
+                            if role == "assistant":
+                                tc = msg.get("tool_calls", [])
+                                if tc:
+                                    tool_names = [t.get("function", {}).get("name", "?") for t in tc]
+                                    summary_parts.append(f"Called tools: {', '.join(tool_names)}")
+                                else:
+                                    snippet = (msg.get("content", "") or "")[:80]
+                                    if snippet:
+                                        summary_parts.append(f"Assistant: {snippet}")
+                            elif role == "tool":
+                                snippet = (msg.get("content", "") or "")[:60]
+                                summary_parts.append(f"Tool result: {snippet}")
+                        summary_text = "\\n".join(summary_parts[-20:])  # cap summary length
+                        context_msg = {
+                            "role": "user",
+                            "content": f"[Context summary of {len(to_remove)} earlier messages:\\n{summary_text}\\n... End summary. Continue with the task.]",
+                        }
+                        messages = messages[:keep_start] + [context_msg] + messages[-keep_recent:]
+                        logger.info("Context window trimmed: %d messages removed, summary injected", len(to_remove))
                     continue
 
                 # --- No tool calls = final response ---
@@ -345,6 +536,17 @@ class LLMClient:
                     if on_chunk:
                         await on_chunk(StreamChunk(type=ChunkType.DONE, turn_number=turn_number))
                     break
+
+            # If loop exhausted all turns without breaking, warn about max_turns
+            else:
+                logger.warning("Agent reached max_turns limit (%d). Stopping.", self.max_turns)
+                if on_chunk:
+                    await on_chunk(StreamChunk(
+                        type=ChunkType.ERROR,
+                        content=f"Agent reached the maximum turn limit ({self.max_turns}). "
+                                f"The task may be incomplete. Consider increasing max_turns or simplifying the task.",
+                        turn_number=self.max_turns,
+                    ))
 
         return turns
 

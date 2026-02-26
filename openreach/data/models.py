@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import Column, DateTime, Integer, String, Text, Boolean, Float, JSON
 from sqlalchemy.orm import DeclarativeBase
+
+
+def _utcnow() -> datetime:
+    """Return current UTC time (timezone-aware). Replaces deprecated _utcnow()."""
+    return datetime.now(timezone.utc)
 
 
 class Base(DeclarativeBase):
@@ -48,8 +53,8 @@ class Campaign(Base):
     delay_max = Column(Integer, nullable=False, default=180)
     # --- State ---
     is_active = Column(Boolean, nullable=False, default=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
 class Lead(Base):
@@ -82,7 +87,7 @@ class Lead(Base):
     # Scraped social profile cache (JSON blob)
     scraped_profile = Column(Text, nullable=True)
     scraped_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
 
 
 class OutreachLog(Base):
@@ -97,7 +102,7 @@ class OutreachLog(Base):
     state = Column(String(32), nullable=False, default="initiated")
     message = Column(Text, nullable=True)
     error = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
 
 
 class Session(Base):
@@ -107,7 +112,7 @@ class Session(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     campaign_id = Column(Integer, nullable=True)
-    started_at = Column(DateTime, default=datetime.utcnow)
+    started_at = Column(DateTime, default=_utcnow)
     ended_at = Column(DateTime, nullable=True)
     messages_sent = Column(Integer, nullable=False, default=0)
     messages_failed = Column(Integer, nullable=False, default=0)
@@ -126,7 +131,7 @@ class ActivityLog(Base):
     level = Column(String(16), nullable=False, default="info")
     message = Column(Text, nullable=False, default="")
     details = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
 
 
 class AgentTurnLog(Base):
@@ -144,4 +149,4 @@ class AgentTurnLog(Base):
     tool_args = Column(Text, nullable=True)  # JSON
     tool_result = Column(Text, nullable=True)
     tokens_used = Column(Integer, nullable=False, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)

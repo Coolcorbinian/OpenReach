@@ -43,6 +43,8 @@ class AgentStats:
     tool_calls_made: int = 0
     turns_used: int = 0
     session_start: float = 0.0
+    total_tokens: int = 0
+    total_cost: float = 0.0
 
 
 class AgentEngine:
@@ -78,6 +80,11 @@ class AgentEngine:
         self._task: dict[str, Any] | None = None
         self._session_id: int | None = None
         self._on_chunk: Callable[[StreamChunk], Awaitable[None]] | None = None
+        self._last_state_save: float = 0.0
+        self._state_save_interval: float = 120.0  # Save browser state every 2 minutes
+        self._messages_this_session: int = 0
+        self._session_limit: int = 15
+        self._daily_limit: int = 50
 
     async def start(
         self,
@@ -101,6 +108,10 @@ class AgentEngine:
         self.stats = AgentStats()
         self.stats.session_start = time.time()
         self._stop_requested = False
+        self._last_state_save = time.time()
+        self._messages_this_session = 0
+        self._session_limit = campaign.get("session_limit", 15)
+        self._daily_limit = campaign.get("daily_limit", 50)
 
         task_id = campaign.get("id")
         user_prompt = campaign.get("user_prompt", "").strip()
@@ -120,12 +131,17 @@ class AgentEngine:
             page = await self.browser.launch(platform="general")
             self._log("info", "Browser ready")
 
+            # Item 6: Check for saved login cookies before running
+            await self._check_login_state(page)
+
             # Build tool registry
             tools = build_tool_registry(
                 page=page,
                 cormass_api=self.cormass_api,
                 store=self.store,
                 task_id=task_id,
+                stop_callback=self.stop,
+                engine=self,
             )
             self._log("info", f"Loaded {len(tools)} tools for the agent")
 
@@ -150,6 +166,25 @@ class AgentEngine:
                     self.stats.tool_calls_made += 1
                 if chunk.type == ChunkType.DONE:
                     self.stats.turns_used = chunk.turn_number
+                # Track cumulative tokens and cost (Item 9)
+                if chunk.tokens_used:
+                    self.stats.total_tokens = chunk.tokens_used
+                if chunk.cost:
+                    self.stats.total_cost = chunk.cost
+
+                # Log errors from LLM client to activity feed so users see them
+                if chunk.type == ChunkType.ERROR:
+                    self._log("error", f"LLM: {chunk.content}")
+
+                # Periodic browser state saving (Item 10)
+                now = time.time()
+                if now - self._last_state_save >= self._state_save_interval:
+                    try:
+                        await self.browser.save_state("general")
+                        self._last_state_save = now
+                        logger.debug("Periodic browser state save completed")
+                    except Exception:
+                        pass
 
                 # Check stop
                 if self._stop_requested:
@@ -204,6 +239,62 @@ class AgentEngine:
         """Request the agent to stop after the current tool call."""
         self._stop_requested = True
         self._log("info", "Stop requested...")
+
+    # ------------------------------------------------------------------
+    # Login / cookie detection (Item 6)
+    # ------------------------------------------------------------------
+
+    async def _check_login_state(self, page: Any) -> None:
+        """Check if the browser has saved login cookies for common platforms."""
+        try:
+            context = page.context
+            cookies = await context.cookies()
+            # Check for Instagram session cookie
+            ig_session = any(
+                c.get("name") == "sessionid" and "instagram" in c.get("domain", "")
+                for c in cookies
+            )
+            if ig_session:
+                self._log("info", "Instagram login detected (session cookie found)")
+            else:
+                self._log("warning",
+                    "No Instagram session cookie found. The agent may need to log in manually. "
+                    "For best results, log into Instagram in the browser first and save the state."
+                )
+        except Exception as e:
+            logger.debug("Cookie check failed: %s", e)
+
+    # ------------------------------------------------------------------
+    # Rate limiting (Item 11)
+    # ------------------------------------------------------------------
+
+    def check_rate_limits(self) -> tuple[bool, str]:
+        """Check if rate limits allow sending another message.
+
+        Returns:
+            (allowed, reason) tuple
+        """
+        # Session limit
+        if self._messages_this_session >= self._session_limit:
+            return False, f"Session limit reached ({self._session_limit} messages)"
+
+        # Daily limit
+        try:
+            today_count = self.store.get_today_message_count()
+            if today_count >= self._daily_limit:
+                return False, f"Daily limit reached ({self._daily_limit} messages)"
+        except Exception:
+            pass
+
+        return True, ""
+
+    def increment_message_count(self, success: bool = True) -> None:
+        """Increment message counters (called by log_message_sent tool)."""
+        if success:
+            self.stats.messages_sent += 1
+            self._messages_this_session += 1
+        else:
+            self.stats.messages_failed += 1
 
     # ------------------------------------------------------------------
     # Message builders

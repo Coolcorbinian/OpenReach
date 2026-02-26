@@ -37,6 +37,8 @@ def build_tool_registry(
     cormass_api: Any | None,
     store: Any | None,
     task_id: int | None = None,
+    stop_callback: Any | None = None,
+    engine: Any | None = None,
 ) -> list[ToolDef]:
     """Build the full list of tools available to the agent.
 
@@ -45,6 +47,8 @@ def build_tool_registry(
         cormass_api: CormassApiClient instance (None = data tools disabled)
         store: DataStore instance (None = utility store tools disabled)
         task_id: Current task ID for logging context
+        stop_callback: Callable to signal the engine to stop (used by finish_task)
+        engine: AgentEngine reference for message counting and rate limits
 
     Returns:
         List of ToolDef objects ready for LLMClient.run_agent()
@@ -60,7 +64,7 @@ def build_tool_registry(
         tools.extend(_data_tools(cormass_api))
 
     # --- Utility tools ---
-    tools.extend(_utility_tools(store, task_id))
+    tools.extend(_utility_tools(store, task_id, stop_callback=stop_callback, engine=engine))
 
     return tools
 
@@ -102,68 +106,144 @@ def _browser_tools(page: Page) -> list[ToolDef]:
             return f"Type failed on {selector}: {e}"
 
     async def browser_screenshot() -> str:
-        """Take a screenshot and return a text description of visible elements."""
+        """Take a screenshot and return a structured accessibility tree of the page.
+
+        Returns a YAML-like accessibility snapshot showing the DOM hierarchy with
+        roles, names, values, and interactive states. This is the primary tool for
+        understanding what is on the page.
+        """
         try:
-            # Get page text content as a more useful representation for the LLM
             title = await page.title()
             url = page.url
 
-            # Get visible text (truncated)
-            text_content = await page.evaluate("""() => {
-                const walker = document.createTreeWalker(
-                    document.body, NodeFilter.SHOW_TEXT, null
-                );
-                const texts = [];
-                let node;
-                while (node = walker.nextNode()) {
-                    const t = node.textContent.trim();
-                    if (t.length > 1) texts.push(t);
-                }
-                return texts.slice(0, 100).join(' | ');
-            }""")
+            # Use Playwright's accessibility snapshot for structured DOM understanding
+            snapshot = await page.accessibility.snapshot()
 
-            # Get interactive elements
-            interactive = await page.evaluate("""() => {
-                const items = [];
-                document.querySelectorAll('a, button, input, textarea, select, [role="button"]').forEach(el => {
-                    const tag = el.tagName.toLowerCase();
-                    const text = (el.textContent || el.value || el.placeholder || '').trim().substring(0, 60);
-                    const href = el.getAttribute('href') || '';
-                    const type = el.getAttribute('type') || '';
-                    const name = el.getAttribute('name') || '';
-                    const id = el.id || '';
-                    const cls = el.className ? el.className.substring(0, 40) : '';
-                    items.push({tag, text, href, type, name, id, cls});
-                });
-                return items.slice(0, 50);
-            }""")
+            def _render_node(node: dict, depth: int = 0, max_depth: int = 8) -> list[str]:
+                """Recursively render accessibility tree nodes."""
+                if depth > max_depth:
+                    return []
+                lines: list[str] = []
+                indent = "  " * depth
+                role = node.get("role", "unknown")
+                name = node.get("name", "")
+                value = node.get("value", "")
 
-            parts = [
-                f"Page: {title}",
-                f"URL: {url}",
-                f"\nVisible text (first 100 nodes):\n{text_content[:3000]}",
-                f"\nInteractive elements ({len(interactive)}):",
-            ]
-            for el in interactive:
-                desc = f"  <{el['tag']}"
-                if el.get('id'):
-                    desc += f' id="{el["id"]}"'
-                if el.get('name'):
-                    desc += f' name="{el["name"]}"'
-                if el.get('type'):
-                    desc += f' type="{el["type"]}"'
-                if el.get('cls'):
-                    desc += f' class="{el["cls"]}"'
-                desc += ">"
-                if el.get('text'):
-                    desc += f" {el['text'][:40]}"
-                if el.get('href'):
-                    desc += f" -> {el['href'][:80]}"
-                parts.append(desc)
+                # Build node description
+                desc_parts = [role]
+                if name:
+                    desc_parts.append(f'"{name}"')
+                if value:
+                    desc_parts.append(f'value="{value}"')
 
-            return "\n".join(parts)
+                # Add useful state flags
+                flags = []
+                if node.get("focused"):
+                    flags.append("focused")
+                if node.get("disabled"):
+                    flags.append("disabled")
+                if node.get("checked") is not None:
+                    flags.append(f"checked={node['checked']}")
+                if node.get("selected"):
+                    flags.append("selected")
+                if node.get("expanded") is not None:
+                    flags.append(f"expanded={node['expanded']}")
+                if node.get("required"):
+                    flags.append("required")
+                if flags:
+                    desc_parts.append(f"[{', '.join(flags)}]")
+
+                line = f"{indent}- {' '.join(desc_parts)}"
+                lines.append(line)
+
+                # Recurse into children
+                for child in node.get("children", []):
+                    lines.extend(_render_node(child, depth + 1, max_depth))
+
+                return lines
+
+            if snapshot:
+                tree_lines = _render_node(snapshot)
+                tree_text = "\n".join(tree_lines)
+                # Truncate if too long (keep first and last parts)
+                if len(tree_text) > 8000:
+                    tree_text = tree_text[:6000] + "\n  ... [truncated] ...\n" + tree_text[-2000:]
+            else:
+                tree_text = "(no accessibility tree available)"
+
+            return f"Page: {title}\nURL: {url}\n\nAccessibility Tree:\n{tree_text}"
         except Exception as e:
             return f"Screenshot/analysis failed: {e}"
+
+    async def browser_find_and_click(text: str, role: str = "") -> str:
+        """Find and click an element by its visible text or ARIA label.
+
+        Much more reliable than CSS selectors for dynamic React UIs.
+        First tries exact match, then substring match.
+
+        Args:
+            text: The visible text, label, or placeholder of the element to click.
+            role: Optional ARIA role filter (e.g. 'button', 'link', 'textbox', 'menuitem').
+        """
+        try:
+            if role:
+                locator = page.get_by_role(role, name=text)
+            else:
+                # Try role-based approaches first (more reliable)
+                for try_role in ["button", "link", "menuitem", "tab", "option"]:
+                    loc = page.get_by_role(try_role, name=text)
+                    count = await loc.count()
+                    if count == 1:
+                        await loc.click(timeout=5000)
+                        return f"Clicked {try_role} '{text}'"
+                    elif count > 1:
+                        await loc.first.click(timeout=5000)
+                        return f"Clicked first {try_role} '{text}' ({count} matches)"
+                # Fallback to get_by_text
+                locator = page.get_by_text(text, exact=False)
+
+            count = await locator.count()
+            if count == 0:
+                return f"No element found with text '{text}'" + (f" and role '{role}'" if role else "")
+            await locator.first.click(timeout=5000)
+            return f"Clicked element with text '{text}'" + (f" (role={role})" if role else "") + (f" ({count} matches, clicked first)" if count > 1 else "")
+        except Exception as e:
+            return f"Find-and-click failed for '{text}': {e}"
+
+    async def browser_fill_by_label(label: str, text: str) -> str:
+        """Fill a text input identified by its label, placeholder, or ARIA label.
+
+        More reliable than CSS selectors for React UIs.
+
+        Args:
+            label: The label, placeholder, or ARIA label of the input field.
+            text: The text to type into the field.
+        """
+        try:
+            # Try placeholder first
+            locator = page.get_by_placeholder(label)
+            count = await locator.count()
+            if count > 0:
+                await locator.first.fill(text, timeout=5000)
+                return f"Filled input (placeholder='{label}') with {len(text)} chars"
+
+            # Try label
+            locator = page.get_by_label(label)
+            count = await locator.count()
+            if count > 0:
+                await locator.first.fill(text, timeout=5000)
+                return f"Filled input (label='{label}') with {len(text)} chars"
+
+            # Try role textbox with name
+            locator = page.get_by_role("textbox", name=label)
+            count = await locator.count()
+            if count > 0:
+                await locator.first.fill(text, timeout=5000)
+                return f"Filled textbox (name='{label}') with {len(text)} chars"
+
+            return f"No input found with label/placeholder '{label}'"
+        except Exception as e:
+            return f"Fill-by-label failed for '{label}': {e}"
 
     async def browser_get_text(selector: str = "body") -> str:
         """Get text content of an element (default: entire body)."""
@@ -272,7 +352,13 @@ def _browser_tools(page: Page) -> list[ToolDef]:
         ),
         ToolDef(
             name="browser_screenshot",
-            description="Analyze the current page: returns page title, URL, visible text content, and all interactive elements (links, buttons, inputs) with their selectors.",
+            description=(
+                "Analyze the current page by returning its accessibility tree. "
+                "Shows the full DOM hierarchy with roles, names, values, and states. "
+                "Use this to understand what elements are on the page and how to interact with them. "
+                "Interactive elements show roles like 'button', 'link', 'textbox', 'menuitem'. "
+                "Use the element names with browser_find_and_click or browser_fill_by_label."
+            ),
             parameters={"type": "object", "properties": {}},
             handler=browser_screenshot,
         ),
@@ -367,6 +453,39 @@ def _browser_tools(page: Page) -> list[ToolDef]:
                 "required": ["expression"],
             },
             handler=browser_evaluate,
+        ),
+        ToolDef(
+            name="browser_find_and_click",
+            description=(
+                "Click an element by its visible text or ARIA label. Much more reliable than CSS selectors "
+                "for dynamic React UIs like Instagram, Facebook, etc. Use names from the accessibility tree "
+                "(browser_screenshot output). Optionally filter by ARIA role (button, link, textbox, menuitem, tab, option)."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "The visible text, label, or ARIA name of the element to click"},
+                    "role": {"type": "string", "description": "Optional ARIA role filter (e.g. 'button', 'link', 'textbox')", "default": ""},
+                },
+                "required": ["text"],
+            },
+            handler=browser_find_and_click,
+        ),
+        ToolDef(
+            name="browser_fill_by_label",
+            description=(
+                "Fill a text input by its label, placeholder, or ARIA label. More reliable than CSS selectors. "
+                "Use placeholder text or label names from the accessibility tree (browser_screenshot output)."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string", "description": "The label, placeholder, or ARIA label of the input"},
+                    "text": {"type": "string", "description": "The text to type into the input"},
+                },
+                "required": ["label", "text"],
+            },
+            handler=browser_fill_by_label,
         ),
     ]
 
@@ -484,7 +603,7 @@ def _data_tools(cormass_api: Any) -> list[ToolDef]:
 # UTILITY TOOLS
 # ===========================================================================
 
-def _utility_tools(store: Any | None, task_id: int | None) -> list[ToolDef]:
+def _utility_tools(store: Any | None, task_id: int | None, stop_callback: Any | None = None, engine: Any | None = None) -> list[ToolDef]:
     """Logging, delay, and progress reporting tools."""
 
     async def report_progress(message: str, percentage: int = -1) -> str:
@@ -509,9 +628,32 @@ def _utility_tools(store: Any | None, task_id: int | None) -> list[ToolDef]:
         success: bool = True,
     ) -> str:
         """Log that a message was sent to a lead. Records in the activity log and outreach log."""
+        # Rate limiting check (Item 11)
+        if engine and success:
+            allowed, reason = engine.check_rate_limits()
+            if not allowed:
+                level = "warning"
+                log_msg = f"Rate limit: {reason}. Message to {lead_name} blocked."
+                if store:
+                    try:
+                        store.log_activity(
+                            message=log_msg,
+                            level=level,
+                            campaign_id=task_id,
+                            details=message_preview[:500],
+                        )
+                    except Exception:
+                        pass
+                logger.warning(log_msg)
+                return log_msg
+
         level = "success" if success else "error"
         status = "sent" if success else "failed"
         log_msg = f"Message {status}: {lead_name} via {channel}"
+
+        # Increment message counters (Item 7)
+        if engine:
+            engine.increment_message_count(success=success)
 
         if store:
             try:
@@ -544,6 +686,12 @@ def _utility_tools(store: Any | None, task_id: int | None) -> list[ToolDef]:
                     level="success",
                     campaign_id=task_id,
                 )
+            except Exception:
+                pass
+        # Signal the engine to stop the agent loop
+        if stop_callback:
+            try:
+                stop_callback()
             except Exception:
                 pass
         return f"Task finished: {summary}"

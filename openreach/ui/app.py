@@ -30,6 +30,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenReach</title>
+    <!-- ====================================================================
+         STYLES
+         ==================================================================== -->
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
@@ -121,11 +124,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         .status-dot.disconnected { background: #ef4444; }
         .status-dot.checking { background: #eab308; }
 
-        /* Toast / notification */
-        .toast { position: fixed; bottom: 2rem; right: 2rem; padding: 0.875rem 1.25rem;
-                 border-radius: 0.5rem; font-size: 0.875rem; z-index: 1000;
-                 transform: translateY(120%); transition: transform 0.3s ease; max-width: 400px; }
-        .toast.show { transform: translateY(0); }
+        /* Toast / notification (Item 29: stacking support) */
+        .toast-container { position: fixed; bottom: 2rem; right: 2rem; z-index: 1000;
+                           display: flex; flex-direction: column-reverse; gap: 0.5rem; max-width: 400px; }
+        .toast { padding: 0.875rem 1.25rem; border-radius: 0.5rem; font-size: 0.875rem;
+                 transform: translateX(120%); transition: transform 0.3s ease; }
+        .toast.show { transform: translateX(0); }
         .toast-success { background: #14532d; color: #4ade80; border: 1px solid #166534; }
         .toast-error { background: #450a0a; color: #f87171; border: 1px solid #7f1d1d; }
         .toast-info { background: #1e3a5f; color: #60a5fa; border: 1px solid #1e40af; }
@@ -232,8 +236,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 <div class="pulse idle" id="agent-pulse"></div>
                 <span id="agent-status-text" style="font-size: 0.875rem; font-weight: 500;">Agent Idle</span>
                 <span id="agent-detail" style="font-size: 0.75rem; color: #737373; margin-left: auto;"></span>
-                <button class="btn btn-primary" id="btn-start" onclick="startAgent()" style="padding: 0.375rem 0.875rem; font-size: 0.8125rem;">Start</button>
-                <button class="btn btn-danger" id="btn-stop" onclick="stopAgent()" style="display:none; padding: 0.375rem 0.875rem; font-size: 0.8125rem;">Stop</button>
+                <button class="btn btn-primary" onclick="startAgent()" id="btn-start" style="padding: 0.375rem 0.875rem; font-size: 0.8125rem;">Start</button>
+                <button class="btn btn-secondary" onclick="previewMessage()" id="btn-preview" style="padding: 0.375rem 0.875rem; font-size: 0.8125rem;">Preview</button>
+                <button class="btn btn-secondary" onclick="dryRunMessage()" id="btn-dryrun" style="padding: 0.375rem 0.875rem; font-size: 0.8125rem;">Dry Run</button>
+                <button class="btn btn-danger" onclick="stopAgent()" id="btn-stop" style="display:none; padding: 0.375rem 0.875rem; font-size: 0.8125rem;">Stop</button>
             </div>
 
             <div class="stats-grid" id="stats">
@@ -263,6 +269,34 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 </div>
             </div>
 
+            <!-- Token/Cost Display (Item 15) -->
+            <div id="token-cost-bar" style="display:none; padding: 0.5rem 1rem; background: #171717; border: 1px solid #262626; border-radius: 0.5rem; margin-bottom: 1rem; font-size: 0.8125rem; color: #737373; display: flex; gap: 1.5rem;">
+                <span>Tokens: <strong id="stat-tokens" style="color: #e5e5e5;">0</strong></span>
+                <span>Cost: <strong id="stat-cost" style="color: #22c55e;">$0.000000</strong></span>
+            </div>
+
+            <!-- Progress Bar (Item 14) -->
+            <div id="agent-progress-section" style="display:none; margin-bottom: 1rem;">
+                <div style="display: flex; justify-content: space-between; font-size: 0.75rem; color: #737373; margin-bottom: 0.375rem;">
+                    <span id="progress-label">Turn 0 / 50</span>
+                    <span id="progress-pct">0%</span>
+                </div>
+                <div style="width: 100%; height: 6px; background: #262626; border-radius: 3px; overflow: hidden;">
+                    <div id="agent-progress-bar" style="height: 100%; background: #7c3aed; border-radius: 3px; transition: width 0.3s ease; width: 0%;"></div>
+                </div>
+            </div>
+
+            <!-- Live Agent Panel (Items 12+13) -->
+            <div class="section" id="agent-live-panel" style="display:none;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+                    <h2 style="margin: 0;">Agent Live View</h2>
+                    <span id="browser-state" style="font-size: 0.75rem; color: #737373;"></span>
+                </div>
+                <div id="agent-reasoning" style="max-height: 200px; overflow-y: auto; font-size: 0.8125rem; font-family: 'Consolas','Monaco',monospace; background: #0a0a0a; border: 1px solid #262626; border-radius: 0.5rem; padding: 0.75rem;">
+                    <div style="color: #525252;">Waiting for agent reasoning...</div>
+                </div>
+            </div>
+
             <!-- Agent Stream -->
             <div class="section">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
@@ -277,7 +311,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             </div>
 
             <div class="section">
-                <h2>Recent Leads</h2>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+                    <h2 style="margin: 0;">Leads</h2>
+                    <div style="display: flex; gap: 0.5rem; align-items: center;">
+                        <input type="text" class="form-input" id="lead-search" placeholder="Search leads..." style="width: 200px; padding: 0.375rem 0.625rem; font-size: 0.8125rem;" oninput="debounceSearchLeads()">
+                        <span id="lead-count" style="font-size: 0.75rem; color: #737373;"></span>
+                    </div>
+                </div>
                 <table>
                     <thead>
                         <tr>
@@ -293,6 +333,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                         <tr><td colspan="6" style="color: #525252">Loading...</td></tr>
                     </tbody>
                 </table>
+                <div id="leads-pagination" style="display: flex; justify-content: center; gap: 0.5rem; margin-top: 0.75rem;"></div>
             </div>
         </div>
 
@@ -353,8 +394,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                     </div>
                     <div class="form-group">
                         <label for="task-model">Model</label>
-                        <input type="text" class="form-input" id="task-model" value="qwen/qwen3-235b-a22b"
-                               placeholder="e.g. qwen/qwen3-235b-a22b">
+                        <input type="text" class="form-input" id="task-model" value="qwen/qwen3-235b-a22b-2507"
+                               placeholder="e.g. qwen/qwen3-235b-a22b-2507">
                     </div>
                 </div>
                 <div class="form-group" id="openrouter-key-group">
@@ -364,6 +405,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                     <div style="font-size: 0.7rem; color: #525252; margin-top: 0.375rem;">
                         Get your key at <a href="https://openrouter.ai/keys" target="_blank" style="color: #7c3aed;">openrouter.ai/keys</a>.
                         This overrides the global key in Settings for this task only.
+                    </div>
+                </div>
+                <div id="ollama-warning" style="display: none; padding: 0.875rem 1rem; background: #422006; border: 1px solid #854d0e; border-radius: 0.5rem; margin-bottom: 1.25rem;">
+                    <div style="font-weight: 600; color: #fbbf24; font-size: 0.875rem; margin-bottom: 0.375rem;">Ollama Limitation</div>
+                    <div style="font-size: 0.8125rem; color: #fde68a; line-height: 1.5;">
+                        Local Ollama models do <strong>not support tool-calling</strong>. The agent will generate a single
+                        text response instead of autonomously controlling the browser. For full agent capabilities
+                        (navigate, click, type, send messages), use OpenRouter with a tool-capable model.
                     </div>
                 </div>
 
@@ -424,6 +473,22 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
         <!-- IMPORT LEADS TAB -->
         <div class="tab-content" id="tab-import">
+            <!-- Item 19: CSV Import -->
+            <div class="section">
+                <h2>Import from CSV File</h2>
+                <p style="color: #737373; font-size: 0.875rem; margin-bottom: 1rem;">
+                    Upload a CSV file with lead data. Required column: <strong>name</strong>.
+                    Optional: instagram_handle, email, phone_number, business_type, location, website.
+                </p>
+                <div style="display: flex; gap: 0.75rem; align-items: center;">
+                    <input type="file" id="csv-file-input" accept=".csv" style="font-size: 0.8125rem; color: #e5e5e5;">
+                    <button class="btn btn-primary" onclick="importCSV()" id="btn-import-csv" style="font-size: 0.8125rem; padding: 0.375rem 0.875rem;">
+                        Import CSV
+                    </button>
+                </div>
+                <div id="csv-import-result" style="margin-top: 0.75rem; font-size: 0.8125rem;"></div>
+            </div>
+
             <div class="section">
                 <h2>Import from Cormass Leads</h2>
                 <p style="color: #737373; font-size: 0.875rem; margin-bottom: 1.25rem;">
@@ -498,7 +563,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                     <div class="form-group">
                         <label for="default-model-input">Default Model</label>
                         <input type="text" class="form-input" id="default-model-input"
-                               value="qwen/qwen3-235b-a22b" placeholder="e.g. qwen/qwen3-235b-a22b">
+                               value="qwen/qwen3-235b-a22b-2507" placeholder="e.g. qwen/qwen3-235b-a22b-2507">
                     </div>
                     <div class="form-group">
                         <label for="default-provider-input">Default Provider</label>
@@ -562,6 +627,43 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                     </label>
                 </div>
             </div>
+
+            <!-- Item 18: Connect Instagram Account -->
+            <div class="section">
+                <h2>Instagram Account</h2>
+                <p style="color: #737373; font-size: 0.875rem; margin-bottom: 1rem;">
+                    OpenReach uses a real browser to automate Instagram. You must log in to Instagram
+                    once in the agent browser so cookies are saved for future sessions.
+                </p>
+                <div style="padding: 1rem; background: #0a0a0a; border: 1px solid #262626; border-radius: 0.5rem; margin-bottom: 1rem;">
+                    <div style="font-weight: 500; margin-bottom: 0.75rem;">How to connect your Instagram account:</div>
+                    <ol style="color: #94a3b8; font-size: 0.8125rem; line-height: 1.8; padding-left: 1.25rem;">
+                        <li>Create a simple task with prompt: <code style="background:#171717;padding:0.125rem 0.375rem;border-radius:0.25rem;">Navigate to instagram.com and wait</code></li>
+                        <li>Start the agent -- a browser window will open</li>
+                        <li>Log in to Instagram manually in that browser window</li>
+                        <li>Stop the agent -- your login cookies are automatically saved</li>
+                        <li>Future agent runs will reuse your saved login session</li>
+                    </ol>
+                </div>
+                <div style="font-size: 0.75rem; color: #525252;">
+                    Cookies are stored locally at: <code style="background:#171717;padding:0.125rem 0.375rem;border-radius:0.25rem;">~/.openreach/browser_state/</code>
+                </div>
+            </div>
+
+            <!-- Item 23: Activity Log Cleanup -->
+            <div class="section">
+                <h2>Maintenance</h2>
+                <p style="color: #737373; font-size: 0.875rem; margin-bottom: 1rem;">
+                    Clean up old activity log entries to keep the database lean.
+                </p>
+                <div style="display: flex; gap: 0.75rem; align-items: center;">
+                    <span style="font-size: 0.875rem;">Delete entries older than</span>
+                    <input type="number" class="form-input" id="cleanup-days" value="30" min="1" max="365" style="width: 80px;">
+                    <span style="font-size: 0.875rem;">days</span>
+                    <button class="btn btn-danger" onclick="cleanupActivity()" style="font-size: 0.8125rem; padding: 0.375rem 0.875rem;">Clean Up</button>
+                </div>
+                <div id="cleanup-result" style="margin-top: 0.5rem; font-size: 0.8125rem; color: #737373;"></div>
+            </div>
         </div>
 
         <div class="footer">
@@ -569,8 +671,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
     </div>
 
-    <!-- Toast notification -->
-    <div class="toast" id="toast"></div>
+    <!-- Toast container (Item 29: stacking) -->
+    <div class="toast-container" id="toast-container"></div>
 
     <script>
         // ---- State ----
@@ -602,12 +704,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             if (tabId === 'task') { loadTasks(); }
         }
 
-        // ---- Toast notifications ----
+        // ---- Toast notifications (Item 29: stacking) ----
         function showToast(message, type) {
-            const toast = document.getElementById('toast');
+            var container = document.getElementById('toast-container');
+            var toast = document.createElement('div');
+            toast.className = 'toast toast-' + (type || 'info');
             toast.textContent = message;
-            toast.className = 'toast toast-' + (type || 'info') + ' show';
-            setTimeout(() => { toast.classList.remove('show'); }, 4000);
+            container.appendChild(toast);
+            // Trigger animation
+            requestAnimationFrame(function() { toast.classList.add('show'); });
+            // Limit to 5 stacked toasts
+            while (container.children.length > 5) { container.removeChild(container.firstChild); }
+            setTimeout(function() {
+                toast.classList.remove('show');
+                setTimeout(function() { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 350);
+            }, 4000);
         }
 
         // ---- Dashboard: Stats + Leads ----
@@ -624,36 +735,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             } catch (e) { console.error('Failed to load stats', e); }
         }
 
-        async function loadLeads() {
-            try {
-                const res = await fetch('/api/leads?limit=20');
-                const leads = await res.json();
-                const tbody = document.getElementById('leads-table');
-                if (!leads.length) {
-                    tbody.innerHTML = '<tr><td colspan="6" style="color:#525252">No leads imported yet. Go to Import Leads tab to get started.</td></tr>';
-                    return;
-                }
-                tbody.innerHTML = leads.map(l => {
-                    let contact = '';
-                    if (l.instagram_handle) contact += '@' + esc(l.instagram_handle);
-                    if (l.email) contact += (contact ? ', ' : '') + esc(l.email);
-                    if (l.phone_number) contact += (contact ? ', ' : '') + esc(l.phone_number);
-                    if (!contact) contact = '-';
-                    return `
-                    <tr>
-                        <td>${esc(l.name) || '-'}</td>
-                        <td>${esc(l.business_type) || '-'}</td>
-                        <td>${esc(l.location) || '-'}</td>
-                        <td style="max-width: 200px; overflow: hidden; text-overflow: ellipsis;">${contact}</td>
-                        <td>${l.rating != null ? l.rating.toFixed(1) : '-'}</td>
-                        <td>${esc(l.source) || '-'}</td>
-                    </tr>`;
-                }).join('');
-            } catch (e) { console.error('Failed to load leads', e); }
-        }
+        // loadLeads is defined below (Search & Pagination section) -- skip the old version
 
         // ---- Agent Controls ----
         async function startAgent() {
+            // Item 17: Confirmation dialog before starting
+            if (!confirm('Start the agent? It will control the browser autonomously using the active task prompt.')) {
+                return;
+            }
             try {
                 const res = await fetch('/api/agent/start', { method: 'POST' });
                 const data = await res.json();
@@ -663,12 +752,71 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 }
                 agentRunning = true;
                 updateAgentUI('running');
-                showToast('Agent started', 'success');
+                showToast('Agent started (' + data.provider + ' / ' + (data.model || 'default') + ')', 'success');
                 startActivityPolling();
                 startStatusPolling();
             } catch (e) {
                 showToast('Failed to start agent', 'error');
             }
+        }
+
+        // Item 16: Preview button
+        async function previewMessage() {
+            try {
+                var promptEl = document.getElementById('task-prompt');
+                var prompt = promptEl ? promptEl.value.trim() : '';
+                if (!prompt) { showToast('Save a task with a prompt first', 'error'); return; }
+                showToast('Generating preview...', 'info');
+                var res = await fetch('/api/agent/preview', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_prompt: prompt })
+                });
+                var data = await res.json();
+                if (data.error) { showToast(data.error, 'error'); return; }
+                // Poll for result
+                var taskId = data.task_id;
+                var poll = setInterval(async function() {
+                    var r = await fetch('/api/agent/preview/' + taskId);
+                    var d = await r.json();
+                    if (d.status === 'done') {
+                        clearInterval(poll);
+                        alert('Preview message for ' + (d.lead_name || 'first lead') + ':\\n\\n' + d.message);
+                    } else if (d.status === 'error') {
+                        clearInterval(poll);
+                        showToast(d.error || 'Preview failed', 'error');
+                    }
+                }, 1500);
+            } catch (e) { showToast('Preview failed', 'error'); }
+        }
+
+        // Item 16: Dry run button
+        async function dryRunMessage() {
+            try {
+                var promptEl = document.getElementById('task-prompt');
+                var prompt = promptEl ? promptEl.value.trim() : '';
+                if (!prompt) { showToast('Save a task with a prompt first', 'error'); return; }
+                showToast('Running dry run...', 'info');
+                var res = await fetch('/api/agent/dry-run', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_prompt: prompt })
+                });
+                var data = await res.json();
+                if (data.error) { showToast(data.error, 'error'); return; }
+                var taskId = data.task_id;
+                var poll = setInterval(async function() {
+                    var r = await fetch('/api/agent/preview/' + taskId);
+                    var d = await r.json();
+                    if (d.status === 'done') {
+                        clearInterval(poll);
+                        alert('[DRY RUN] Message for ' + (d.lead_name || 'first lead') + ':\\n\\n' + d.message + '\\n\\n(' + d.chars + ' chars)');
+                    } else if (d.status === 'error') {
+                        clearInterval(poll);
+                        showToast(d.error || 'Dry run failed', 'error');
+                    }
+                }, 1500);
+            } catch (e) { showToast('Dry run failed', 'error'); }
         }
 
         async function stopAgent() {
@@ -685,19 +833,31 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             const text = document.getElementById('agent-status-text');
             const btnStart = document.getElementById('btn-start');
             const btnStop = document.getElementById('btn-stop');
+            const btnPreview = document.getElementById('btn-preview');
+            const btnDryrun = document.getElementById('btn-dryrun');
             const statusHeader = document.getElementById('agent-status');
+            const progressSection = document.getElementById('agent-progress-section');
+            const livePanel = document.getElementById('agent-live-panel');
+            const tokenBar = document.getElementById('token-cost-bar');
 
             if (state === 'running' || state === 'starting' || state === 'waiting') {
                 pulse.className = 'pulse running';
                 const labels = { running: 'Running', starting: 'Starting', waiting: 'Waiting for LLM' };
                 text.textContent = 'Agent: ' + (labels[state] || 'Running');
                 btnStart.style.display = 'none';
+                btnPreview.style.display = 'none';
+                btnDryrun.style.display = 'none';
                 btnStop.style.display = '';
                 agentRunning = true;
+                if (progressSection) progressSection.style.display = '';
+                if (livePanel) livePanel.style.display = '';
+                if (tokenBar) tokenBar.style.display = 'flex';
             } else if (state === 'error') {
                 pulse.className = 'pulse error';
                 text.textContent = 'Agent: Error';
                 btnStart.style.display = '';
+                btnPreview.style.display = '';
+                btnDryrun.style.display = '';
                 btnStop.style.display = 'none';
                 agentRunning = false;
                 stopActivityPolling();
@@ -706,10 +866,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 pulse.className = 'pulse idle';
                 text.textContent = 'Agent: Idle';
                 btnStart.style.display = '';
+                btnPreview.style.display = '';
+                btnDryrun.style.display = '';
                 btnStop.style.display = 'none';
                 agentRunning = false;
                 stopActivityPolling();
                 stopStatusPolling();
+                if (progressSection) progressSection.style.display = 'none';
+                if (livePanel) livePanel.style.display = 'none';
+                if (tokenBar) tokenBar.style.display = 'none';
             }
             if (statusHeader) { statusHeader.textContent = text.textContent; }
         }
@@ -732,8 +897,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 const entries = await res.json();
                 if (entries.length > 0) {
                     const logEl = document.getElementById('activity-log');
+                    const reasoningEl = document.getElementById('agent-reasoning');
+                    const browserState = document.getElementById('browser-state');
                     // Remove placeholder
-                    if (lastActivityId === 0) { logEl.innerHTML = ''; }
+                    if (lastActivityId === 0) {
+                        logEl.innerHTML = '';
+                        if (reasoningEl) reasoningEl.innerHTML = '';
+                    }
                     entries.forEach(e => {
                         const div = document.createElement('div');
                         div.className = 'activity-entry level-' + e.level;
@@ -741,6 +911,29 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                         div.innerHTML = '<span class="time">' + time + '</span>' + esc(e.message);
                         logEl.appendChild(div);
                         lastActivityId = Math.max(lastActivityId, e.id);
+
+                        // Item 12: Feed agent reasoning/tool calls into the live panel
+                        if (reasoningEl && e.message && (
+                            e.message.indexOf('[Agent]') >= 0 ||
+                            e.message.indexOf('Calling ') >= 0 ||
+                            e.message.indexOf('Tool ') >= 0 ||
+                            e.message.indexOf('Navigated to') >= 0 ||
+                            e.message.indexOf('Clicked') >= 0 ||
+                            e.level === 'success' || e.level === 'error'
+                        )) {
+                            var rdiv = document.createElement('div');
+                            rdiv.style.cssText = 'padding:0.25rem 0;border-bottom:1px solid #1a1a1a;color:' +
+                                (e.level === 'error' ? '#f87171' : e.level === 'success' ? '#4ade80' : '#94a3b8');
+                            rdiv.textContent = e.message;
+                            reasoningEl.appendChild(rdiv);
+                            reasoningEl.scrollTop = reasoningEl.scrollHeight;
+                        }
+
+                        // Item 13: Extract browser state from navigation messages
+                        if (browserState && e.message) {
+                            var navMatch = e.message.match(/Navigated to (\\S+)/);
+                            if (navMatch) browserState.textContent = 'URL: ' + navMatch[1];
+                        }
                     });
                     logEl.scrollTop = logEl.scrollHeight;
                 }
@@ -770,9 +963,27 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 updateAgentUI(data.state);
                 const detail = document.getElementById('agent-detail');
                 if (data.stats) {
-                    detail.textContent = 'Tools: ' + (data.stats.tool_calls_made || 0) +
-                        ' | Turns: ' + (data.stats.turns_used || 0) +
-                        ' | Sent: ' + (data.stats.messages_sent || 0);
+                    var s = data.stats;
+                    detail.textContent = 'Tools: ' + (s.tool_calls_made || 0) +
+                        ' | Turns: ' + (s.turns_used || 0) +
+                        ' | Sent: ' + (s.messages_sent || 0);
+
+                    // Item 14: Update progress bar
+                    var maxTurns = 50; // default
+                    var turns = s.turns_used || 0;
+                    var pct = Math.min(100, Math.round(turns / maxTurns * 100));
+                    var progressLabel = document.getElementById('progress-label');
+                    var progressPct = document.getElementById('progress-pct');
+                    var progressBar = document.getElementById('agent-progress-bar');
+                    if (progressLabel) progressLabel.textContent = 'Turn ' + turns + ' / ' + maxTurns;
+                    if (progressPct) progressPct.textContent = pct + '%';
+                    if (progressBar) progressBar.style.width = pct + '%';
+
+                    // Item 15: Update token/cost display
+                    var tokensEl = document.getElementById('stat-tokens');
+                    var costEl = document.getElementById('stat-cost');
+                    if (tokensEl) tokensEl.textContent = (s.total_tokens || 0).toLocaleString();
+                    if (costEl) costEl.textContent = '$' + (s.total_cost || 0).toFixed(6);
                 }
                 if (data.state === 'idle' || data.state === 'stopped' || data.state === 'error') {
                     loadStats(); // refresh dashboard stats after run
@@ -786,10 +997,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             document.getElementById('provider-openrouter').classList.toggle('active', provider === 'openrouter');
             document.getElementById('provider-ollama').classList.toggle('active', provider === 'ollama');
             document.getElementById('openrouter-key-group').style.display = provider === 'openrouter' ? '' : 'none';
+            // Show/hide Ollama limitation warning
+            var ollamaWarn = document.getElementById('ollama-warning');
+            if (ollamaWarn) ollamaWarn.style.display = provider === 'ollama' ? '' : 'none';
             if (provider === 'ollama') {
                 document.getElementById('task-model').value = 'qwen3:4b';
             } else {
-                document.getElementById('task-model').value = 'qwen/qwen3-235b-a22b';
+                document.getElementById('task-model').value = 'qwen/qwen3-235b-a22b-2507';
             }
         }
 
@@ -824,7 +1038,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             document.getElementById('task-notes').value = c.additional_notes || '';
             document.getElementById('task-canvas-ids').value = c.context_canvas_ids || '';
             setProvider(c.llm_provider || 'openrouter');
-            document.getElementById('task-model').value = c.llm_model || 'qwen/qwen3-235b-a22b';
+            document.getElementById('task-model').value = c.llm_model || 'qwen/qwen3-235b-a22b-2507';
             document.getElementById('task-daily').value = c.daily_limit || 50;
             document.getElementById('task-session').value = c.session_limit || 15;
             document.getElementById('task-delay-min').value = c.delay_min || 45;
@@ -841,7 +1055,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             document.getElementById('task-canvas-ids').value = '';
             document.getElementById('task-template-select').value = '';
             setProvider('openrouter');
-            document.getElementById('task-model').value = 'qwen/qwen3-235b-a22b';
+            document.getElementById('task-model').value = 'qwen/qwen3-235b-a22b-2507';
             document.getElementById('task-openrouter-key').value = '';
             showToast('Form cleared for new task', 'info');
         }
@@ -977,7 +1191,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 if (data.has_openrouter_key) {
                     document.getElementById('openrouter-key-input').placeholder = 'Key saved (enter new key to replace)';
                 }
-                document.getElementById('default-model-input').value = data.llm_model || 'qwen/qwen3-235b-a22b';
+                document.getElementById('default-model-input').value = data.llm_model || 'qwen/qwen3-235b-a22b-2507';
                 document.getElementById('default-provider-input').value = data.llm_provider || 'openrouter';
                 // Verbose toggle
                 verboseMode = !!data.verbose;
@@ -1243,6 +1457,147 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
         }
 
+        // ---- CSV Import (Item 19) ----
+        async function importCSV() {
+            var fileInput = document.getElementById('csv-file-input');
+            var resultEl = document.getElementById('csv-import-result');
+            if (!fileInput.files || !fileInput.files[0]) {
+                showToast('Select a CSV file first', 'error');
+                return;
+            }
+            var btn = document.getElementById('btn-import-csv');
+            btn.disabled = true; btn.textContent = 'Importing...';
+            resultEl.textContent = '';
+            var formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+            try {
+                var res = await fetch('/api/leads/import-csv', { method: 'POST', body: formData });
+                var data = await res.json();
+                if (data.error) {
+                    resultEl.innerHTML = '<span style="color:#f87171;">' + esc(data.error) + '</span>';
+                    showToast(data.error, 'error');
+                } else {
+                    resultEl.innerHTML = '<span style="color:#4ade80;">Imported ' + data.imported + ' leads</span>';
+                    showToast('Imported ' + data.imported + ' leads from CSV', 'success');
+                    loadStats(); loadLeads();
+                }
+            } catch (e) { showToast('CSV import failed', 'error'); }
+            btn.disabled = false; btn.textContent = 'Import CSV';
+        }
+
+        // ---- Lead Search & Pagination (Item 20) ----
+        let leadSearchTimer = null;
+        let currentLeadPage = 0;
+        const LEADS_PER_PAGE = 20;
+
+        function debounceSearchLeads() {
+            if (leadSearchTimer) clearTimeout(leadSearchTimer);
+            leadSearchTimer = setTimeout(function() { currentLeadPage = 0; loadLeads(); }, 400);
+        }
+
+        async function loadLeads(page) {
+            if (page !== undefined) currentLeadPage = page;
+            var search = (document.getElementById('lead-search') || {}).value || '';
+            var offset = currentLeadPage * LEADS_PER_PAGE;
+            try {
+                var url = '/api/leads?limit=' + LEADS_PER_PAGE + '&offset=' + offset;
+                if (search.trim()) url += '&search=' + encodeURIComponent(search.trim());
+                const res = await fetch(url);
+                const raw = await res.json();
+                var leads = Array.isArray(raw) ? raw : (raw.leads || []);
+                var total = raw.total || null;
+                const tbody = document.getElementById('leads-table');
+                var countEl = document.getElementById('lead-count');
+                if (!leads.length) {
+                    tbody.innerHTML = '<tr><td colspan="6" style="color:#525252">' + (search ? 'No leads match your search.' : 'No leads imported yet. Go to Import Leads tab to get started.') + '</td></tr>';
+                    if (countEl) countEl.textContent = '';
+                    document.getElementById('leads-pagination').innerHTML = '';
+                    return;
+                }
+                if (countEl && total !== null) countEl.textContent = total + ' total';
+                tbody.innerHTML = leads.map(function(l) {
+                    var contact = '';
+                    if (l.instagram_handle) contact += '@' + esc(l.instagram_handle);
+                    if (l.email) contact += (contact ? ', ' : '') + esc(l.email);
+                    if (l.phone_number) contact += (contact ? ', ' : '') + esc(l.phone_number);
+                    if (!contact) contact = '-';
+                    return '<tr style="cursor:pointer;" onclick="toggleLeadHistory(' + l.id + ', this)">' +
+                        '<td>' + (esc(l.name) || '-') + '</td>' +
+                        '<td>' + (esc(l.business_type) || '-') + '</td>' +
+                        '<td>' + (esc(l.location) || '-') + '</td>' +
+                        '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;">' + contact + '</td>' +
+                        '<td>' + (l.rating != null ? l.rating.toFixed(1) : '-') + '</td>' +
+                        '<td>' + (esc(l.source) || '-') + '</td></tr>';
+                }).join('');
+                // Pagination controls
+                var pagDiv = document.getElementById('leads-pagination');
+                if (total && total > LEADS_PER_PAGE) {
+                    var pages = Math.ceil(total / LEADS_PER_PAGE);
+                    var html = '';
+                    for (var p = 0; p < pages && p < 10; p++) {
+                        html += '<button class="btn btn-secondary" style="font-size:0.75rem;padding:0.25rem 0.5rem;' +
+                            (p === currentLeadPage ? 'background:#7c3aed;color:#fff;' : '') +
+                            '" onclick="loadLeads(' + p + ')">' + (p + 1) + '</button>';
+                    }
+                    pagDiv.innerHTML = html;
+                } else {
+                    pagDiv.innerHTML = '';
+                }
+            } catch (e) { console.error('Failed to load leads', e); }
+        }
+
+        // Item 21: Outreach history per lead (expandable row)
+        async function toggleLeadHistory(leadId, rowEl) {
+            var nextRow = rowEl.nextElementSibling;
+            if (nextRow && nextRow.classList.contains('lead-history-row')) {
+                nextRow.remove();
+                return;
+            }
+            var tr = document.createElement('tr');
+            tr.className = 'lead-history-row';
+            tr.innerHTML = '<td colspan="6" style="background:#0a0a0a;padding:0.75rem;font-size:0.8125rem;"><span class="spinner"></span> Loading history...</td>';
+            rowEl.after(tr);
+            try {
+                var res = await fetch('/api/leads/' + leadId + '/history');
+                var history = await res.json();
+                if (!history.length) {
+                    tr.innerHTML = '<td colspan="6" style="background:#0a0a0a;padding:0.75rem;font-size:0.8125rem;color:#525252;">No outreach history for this lead.</td>';
+                } else {
+                    var html = '<td colspan="6" style="background:#0a0a0a;padding:0.75rem;"><div style="font-size:0.75rem;color:#737373;margin-bottom:0.5rem;">Outreach History (' + history.length + ' entries)</div>';
+                    html += '<table style="width:100%;font-size:0.8125rem;">';
+                    history.forEach(function(h) {
+                        var badge = h.state === 'sent' ? 'badge-sent' : h.state === 'replied' ? 'badge-replied' : h.state === 'failed' ? 'badge-failed' : 'badge-pending';
+                        html += '<tr><td><span class="badge ' + badge + '">' + esc(h.state) + '</span></td>' +
+                            '<td>' + esc(h.channel) + '</td>' +
+                            '<td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;">' + (esc(h.message) || '-') + '</td>' +
+                            '<td style="color:#525252;">' + (h.created_at ? new Date(h.created_at).toLocaleString() : '-') + '</td></tr>';
+                    });
+                    html += '</table></td>';
+                    tr.innerHTML = html;
+                }
+            } catch (e) { tr.innerHTML = '<td colspan="6" style="background:#0a0a0a;color:#f87171;">Failed to load history</td>'; }
+        }
+
+        // Item 23: Activity log cleanup
+        async function cleanupActivity() {
+            var days = parseInt(document.getElementById('cleanup-days').value) || 30;
+            if (!confirm('Delete activity log entries older than ' + days + ' days?')) return;
+            try {
+                var res = await fetch('/api/activity/cleanup', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ max_age_days: days })
+                });
+                var data = await res.json();
+                if (data.ok) {
+                    document.getElementById('cleanup-result').innerHTML = '<span style="color:#4ade80;">Deleted ' + data.deleted + ' old entries.</span>';
+                    showToast('Cleaned up ' + data.deleted + ' entries', 'success');
+                } else {
+                    showToast(data.error || 'Cleanup failed', 'error');
+                }
+            } catch (e) { showToast('Cleanup failed', 'error'); }
+        }
+
         // ---- Init ----
         loadStats();
         loadLeads();
@@ -1335,13 +1690,81 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
 
     @app.route("/api/stats")
     def api_stats():  # type: ignore[no-untyped-def]
-        return jsonify(store.get_stats())
+        stats = store.get_stats()
+        # Always include agent runtime keys with defaults (Item 2)
+        stats.setdefault("tool_calls", 0)
+        stats.setdefault("turns_used", 0)
+        # Merge live agent runtime stats so dashboard cards reflect current run
+        with _agent_lock:
+            if _agent_engine:
+                st = _agent_engine.stats
+                stats["tool_calls"] = st.tool_calls_made
+                stats["turns_used"] = st.turns_used
+        return jsonify(stats)
 
     @app.route("/api/leads")
     def api_leads():  # type: ignore[no-untyped-def]
         limit = request.args.get("limit", 50, type=int)
-        leads = store.get_leads(limit=limit)
+        offset = request.args.get("offset", 0, type=int)
+        search = request.args.get("search", "", type=str).strip() or None
+        leads = store.get_leads(limit=limit, offset=offset, search=search)
+        total = store.count_leads(search=search) if search or offset else None
+        result = leads
+        if total is not None:
+            return jsonify({"leads": leads, "total": total})
         return jsonify(leads)
+
+    @app.route("/api/leads/<int:lead_id>/history")
+    def api_lead_history(lead_id: int):  # type: ignore[no-untyped-def]
+        """Get outreach history for a lead (Item 21)."""
+        history = store.get_lead_outreach_history(lead_id)
+        return jsonify(history)
+
+    @app.route("/api/leads/import-csv", methods=["POST"])
+    def api_leads_import_csv():  # type: ignore[no-untyped-def]
+        """Import leads from a CSV file upload (Item 19)."""
+        if "file" not in request.files:
+            return jsonify({"error": "No file uploaded"}), 400
+        f = request.files["file"]
+        if not f.filename or not f.filename.endswith(".csv"):
+            return jsonify({"error": "File must be a .csv"}), 400
+        try:
+            import csv
+            import io
+            content = f.stream.read().decode("utf-8-sig")
+            reader = csv.DictReader(io.StringIO(content))
+            leads_data = []
+            for row in reader:
+                lead = {
+                    "name": row.get("name", row.get("Name", row.get("business_name", ""))).strip(),
+                    "instagram_handle": row.get("instagram_handle", row.get("instagram", "")).strip().lstrip("@"),
+                    "phone_number": row.get("phone_number", row.get("phone", "")).strip(),
+                    "email": row.get("email", row.get("Email", "")).strip(),
+                    "business_type": row.get("business_type", row.get("type", row.get("category", ""))).strip(),
+                    "location": row.get("location", row.get("address", row.get("city", ""))).strip(),
+                    "website": row.get("website", row.get("url", "")).strip(),
+                    "source": "csv",
+                }
+                if lead["name"]:
+                    leads_data.append(lead)
+            if not leads_data:
+                return jsonify({"error": "No valid leads found in CSV. Ensure a 'name' column exists."}), 400
+            imported = store.add_leads(leads_data)
+            return jsonify({"imported": imported, "total_rows": len(leads_data)})
+        except Exception as e:
+            logger.error("CSV import failed: %s", e)
+            return jsonify({"error": f"CSV parse error: {e}"}), 400
+
+    @app.route("/api/activity/cleanup", methods=["POST"])
+    def api_activity_cleanup():  # type: ignore[no-untyped-def]
+        """Delete old activity log entries (Item 23)."""
+        body = request.get_json(force=True, silent=True) or {}
+        max_age_days = body.get("max_age_days", 30)
+        try:
+            deleted = store.cleanup_activity_log(max_age_days=int(max_age_days))
+            return jsonify({"ok": True, "deleted": deleted})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
 
     # ---- Campaigns ----
 
@@ -1427,7 +1850,7 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
                 api_key = llm_cfg.get("openrouter_api_key", "")
                 if not api_key:
                     return jsonify({"error": "No OpenRouter API key configured. Add one in Settings."}), 400
-                model = campaign.get("llm_model") or llm_cfg.get("model", "qwen/qwen3-235b-a22b")
+                model = campaign.get("llm_model") or llm_cfg.get("model", "qwen/qwen3-235b-a22b-2507")
                 base_url = "https://openrouter.ai/api/v1"
             else:
                 api_key = ""
@@ -1491,6 +1914,8 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
                     "leads_processed": st.leads_processed,
                     "tool_calls_made": st.tool_calls_made,
                     "turns_used": st.turns_used,
+                    "total_tokens": st.total_tokens,
+                    "total_cost": round(st.total_cost, 6),
                 }
                 return jsonify({
                     "state": _agent_engine.state.value if hasattr(_agent_engine.state, 'value') else str(_agent_engine.state),
@@ -1547,7 +1972,7 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
                             _preview_tasks[task_id] = {"status": "error", "result": {"error": "No OpenRouter API key"}}
                         return
                     llm = LLMClient(provider=LLMProvider.OPENROUTER, api_key=api_key,
-                                     model=llm_cfg.get("model", "qwen/qwen3-235b-a22b"))
+                                     model=llm_cfg.get("model", "qwen/qwen3-235b-a22b-2507"))
                 else:
                     llm = LLMClient(provider=LLMProvider.OLLAMA,
                                      base_url=llm_cfg.get("ollama_base_url", "http://localhost:11434"),
@@ -1620,7 +2045,7 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
                             _preview_tasks[task_id] = {"status": "error", "result": {"error": "No OpenRouter API key"}}
                         return
                     llm = LLMClient(provider=LLMProvider.OPENROUTER, api_key=api_key,
-                                     model=llm_cfg.get("model", "qwen/qwen3-235b-a22b"))
+                                     model=llm_cfg.get("model", "qwen/qwen3-235b-a22b-2507"))
                 else:
                     llm = LLMClient(provider=LLMProvider.OLLAMA,
                                      base_url=llm_cfg.get("ollama_base_url", "http://localhost:11434"),
@@ -1694,7 +2119,7 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
             "base_url": cormass.get("base_url", "https://cormass.com/wp-json/leads/v1"),
             "has_openrouter_key": bool(or_key),
             "openrouter_key_masked": or_masked,
-            "llm_model": llm.get("model", "qwen/qwen3-235b-a22b"),
+            "llm_model": llm.get("model", "qwen/qwen3-235b-a22b-2507"),
             "llm_provider": llm.get("provider", "openrouter"),
             "verbose": verbose,
         })
@@ -1766,7 +2191,7 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
                 llm = LLMClient(
                     provider=LLMProvider.OPENROUTER,
                     api_key=api_key,
-                    model=llm_cfg.get("model", "qwen/qwen3-235b-a22b"),
+                    model=llm_cfg.get("model", "qwen/qwen3-235b-a22b-2507"),
                 )
             else:
                 llm = LLMClient(
@@ -1774,7 +2199,8 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
                     base_url=llm_cfg.get("ollama_base_url", "http://localhost:11434"),
                     model=llm_cfg.get("ollama_model", "qwen3:4b"),
                 )
-            healthy = llm.check_health()
+            # check_health() is async -- must run in event loop from sync Flask context
+            healthy = asyncio.run(llm.check_health())
             if healthy:
                 return jsonify({"ok": True, "provider": provider})
             else:

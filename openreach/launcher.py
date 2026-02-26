@@ -389,8 +389,26 @@ def main() -> None:
         # Step 1: Legal acceptance on first run
         _check_legal_acceptance()
 
-        # Step 2: Ollama setup
-        _setup_ollama()
+        # Step 2: Ollama setup -- skip if OpenRouter is configured (Item 28)
+        _skip_ollama = False
+        try:
+            import yaml
+            if CONFIG_FILE.exists():
+                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                    user_cfg = yaml.safe_load(f) or {}
+                llm_cfg = user_cfg.get("llm", {})
+                provider = llm_cfg.get("provider", "openrouter")
+                has_or_key = bool(llm_cfg.get("openrouter_api_key", ""))
+                # Also check env var
+                has_or_key = has_or_key or bool(os.environ.get("OPENROUTER_API_KEY", ""))
+                if provider == "openrouter" and has_or_key:
+                    _ok("Using OpenRouter provider with API key -- skipping local Ollama setup.")
+                    _skip_ollama = True
+        except Exception:
+            pass
+
+        if not _skip_ollama:
+            _setup_ollama()
 
         print()
 

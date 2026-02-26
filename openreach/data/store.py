@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import create_engine, func
@@ -94,15 +94,26 @@ class DataStore:
         source: str | None = None,
         canvas_id: int | None = None,
         limit: int = 1000,
+        offset: int = 0,
+        search: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Get leads, optionally filtered by source or canvas ID."""
+        """Get leads, optionally filtered by source, canvas ID, or search query (Item 20)."""
         with self._session() as session:
             query = session.query(Lead)
             if source:
                 query = query.filter(Lead.source == source)
             if canvas_id is not None:
                 query = query.filter(Lead.cormass_canvas_id == canvas_id)
-            query = query.order_by(Lead.created_at.desc()).limit(limit)
+            if search:
+                pattern = f"%{search}%"
+                query = query.filter(
+                    Lead.name.ilike(pattern)
+                    | Lead.business_type.ilike(pattern)
+                    | Lead.location.ilike(pattern)
+                    | Lead.instagram_handle.ilike(pattern)
+                    | Lead.email.ilike(pattern)
+                )
+            query = query.order_by(Lead.created_at.desc()).offset(offset).limit(limit)
 
             return [
                 {
@@ -187,7 +198,7 @@ class DataStore:
     def get_today_message_count(self) -> int:
         """Get the number of messages sent today."""
         with self._session() as session:
-            today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
             count = (
                 session.query(func.count(OutreachLog.id))
                 .filter(
@@ -214,7 +225,7 @@ class DataStore:
         with self._session() as session:
             s = session.query(Session).filter(Session.id == session_id).first()
             if s:
-                s.ended_at = datetime.utcnow()
+                s.ended_at = datetime.now(timezone.utc)
                 s.messages_sent = stats.get("messages_sent", 0)
                 s.messages_failed = stats.get("messages_failed", 0)
                 s.leads_processed = stats.get("leads_processed", 0)
@@ -296,7 +307,7 @@ class DataStore:
             ):
                 if key in data:
                     setattr(campaign, key, data[key])
-            campaign.updated_at = datetime.utcnow()
+            campaign.updated_at = datetime.now(timezone.utc)
             session.commit()
             session.refresh(campaign)
             return self._campaign_to_dict(campaign)
@@ -324,11 +335,16 @@ class DataStore:
             return self._campaign_to_dict(campaign)
 
     def delete_campaign(self, campaign_id: int) -> bool:
-        """Delete a campaign. Returns True if deleted."""
+        """Delete a campaign and cascade-delete related data (Item 22)."""
         with self._session() as session:
             campaign = session.query(Campaign).filter(Campaign.id == campaign_id).first()
             if not campaign:
                 return False
+            # Cascade: delete related outreach logs, agent turns, activity log entries
+            session.query(OutreachLog).filter(OutreachLog.campaign_id == campaign_id).delete()
+            session.query(AgentTurnLog).filter(AgentTurnLog.campaign_id == campaign_id).delete()
+            session.query(ActivityLog).filter(ActivityLog.campaign_id == campaign_id).delete()
+            session.query(Session).filter(Session.campaign_id == campaign_id).delete()
             session.delete(campaign)
             session.commit()
             return True
@@ -406,6 +422,51 @@ class DataStore:
                 for e in reversed(entries)  # chronological order
             ]
 
+    def count_leads(self, search: str | None = None) -> int:
+        """Count leads, optionally filtered by search query (Item 20)."""
+        with self._session() as session:
+            query = session.query(func.count(Lead.id))
+            if search:
+                pattern = f"%{search}%"
+                query = query.filter(
+                    Lead.name.ilike(pattern)
+                    | Lead.business_type.ilike(pattern)
+                    | Lead.location.ilike(pattern)
+                    | Lead.instagram_handle.ilike(pattern)
+                    | Lead.email.ilike(pattern)
+                )
+            return query.scalar() or 0
+
+    def get_lead_outreach_history(self, lead_id: int) -> list[dict[str, Any]]:
+        """Get outreach history for a specific lead (Item 21)."""
+        with self._session() as session:
+            entries = (
+                session.query(OutreachLog)
+                .filter(OutreachLog.lead_id == lead_id)
+                .order_by(OutreachLog.created_at.desc())
+                .limit(50)
+                .all()
+            )
+            return [
+                {
+                    "id": e.id,
+                    "channel": e.channel,
+                    "state": e.state,
+                    "message": e.message,
+                    "error": e.error,
+                    "created_at": e.created_at.isoformat() if e.created_at else None,
+                }
+                for e in entries
+            ]
+
+    def cleanup_activity_log(self, max_age_days: int = 30) -> int:
+        """Delete old activity log entries (Item 23). Returns count deleted."""
+        with self._session() as session:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+            count = session.query(ActivityLog).filter(ActivityLog.created_at < cutoff).delete()
+            session.commit()
+            return count
+
     # --- Lead profile cache ---
 
     def update_lead_profile(self, lead_id: int, profile_data: dict[str, Any]) -> None:
@@ -414,7 +475,7 @@ class DataStore:
             lead = session.query(Lead).filter(Lead.id == lead_id).first()
             if lead:
                 lead.scraped_profile = json.dumps(profile_data)
-                lead.scraped_at = datetime.utcnow()
+                lead.scraped_at = datetime.now(timezone.utc)
                 session.commit()
 
     def get_lead_cached_profile(self, lead_id: int, max_age_days: int = 7) -> dict[str, Any] | None:
@@ -423,7 +484,7 @@ class DataStore:
             lead = session.query(Lead).filter(Lead.id == lead_id).first()
             if not lead or not lead.scraped_profile or not lead.scraped_at:
                 return None
-            age = datetime.utcnow() - lead.scraped_at
+            age = datetime.now(timezone.utc) - lead.scraped_at
             if age > timedelta(days=max_age_days):
                 return None
             try:

@@ -14,7 +14,7 @@ CONFIG_FILE = CONFIG_DIR / "config.yaml"
 DEFAULT_CONFIG: dict[str, Any] = {
     "llm": {
         "provider": "openrouter",
-        "model": "qwen/qwen3-235b-a22b",
+        "model": "qwen/qwen3-235b-a22b-2507",
         "temperature": 0.4,
         "base_url": "",
         "openrouter_api_key": "",
@@ -79,6 +79,29 @@ def load_config() -> dict[str, Any]:
     env_provider = os.environ.get("OPENREACH_LLM_PROVIDER")
     if env_provider:
         config["llm"]["provider"] = env_provider
+
+    return _validate_config(config)
+
+
+def _validate_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Validate and clamp config values to safe ranges (Item 26)."""
+    llm = config.get("llm", {})
+    # Validate provider
+    if llm.get("provider") not in ("openrouter", "ollama"):
+        llm["provider"] = "openrouter"
+    # Clamp numeric values
+    llm["temperature"] = max(0.0, min(2.0, float(llm.get("temperature", 0.4))))
+    llm["max_tokens"] = max(256, min(32768, int(llm.get("max_tokens", 4096))))
+    llm["max_turns"] = max(1, min(500, int(llm.get("max_turns", 50))))
+
+    outreach = config.get("outreach", {})
+    outreach["delay_min"] = max(5, min(600, int(outreach.get("delay_min", 45))))
+    outreach["delay_max"] = max(outreach["delay_min"], min(900, int(outreach.get("delay_max", 180))))
+    outreach["daily_limit"] = max(1, min(1000, int(outreach.get("daily_limit", 50))))
+    outreach["session_limit"] = max(1, min(500, int(outreach.get("session_limit", 15))))
+
+    ui = config.get("ui", {})
+    ui["port"] = max(1, min(65535, int(ui.get("port", 5000))))
 
     return config
 
